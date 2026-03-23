@@ -279,27 +279,154 @@ class jjc_reward(Module):
             await client.receive_grand_arena_reward()
         self._log(f"pjjc币x{info.reward_info.count}")
 
-@description('展示基本信息')
+@description('展示基本信息，固定显示玩家名、体力、等级、钻石、母猪石、全角色战力，可自定义显示其他信息')
 @name('基本信息')
 @default(True)
+@multichoice("user_info_display", "显示信息",
+    ['玛娜', '心碎', '星杯', '星幽碎片', '属性球', '大师碎片', '炼金点数', '香水', '扫荡券', '加速券', '大师币', '连结币'],
+    ['玛娜', '心碎', '星幽碎片', '炼金点数'])
 class user_info(Module):
+    def _format_number(self, num: int) -> str:
+        """格式化数字，添加千位分隔符"""
+        return f"{num:,}"
+
     async def do_task(self, client: pcrclient):
         now = db.format_time(apiclient.datetime)
+        display_items = set(self.get_config('user_info_display'))
+
+        # 固定信息
         name = client.data.user_name
         level = client.data.team_level
         stamina = client.data.stamina
         max_stamina = db.team_info[client.data.team_level].max_stamina
-        jewel = client.data.jewel.free_jewel
-        mana = client.data.gold.gold_id_free
-        sweep_ticket = client.data.get_inventory((eInventoryType.Item, 23001))
+        jewel = client.data.jewel.free_jewel + client.data.jewel.jewel
         pig = client.data.get_inventory((eInventoryType.Item, 90005))
         tot_power = sum([client.data.get_unit_power(unit) for unit in client.data.unit])
 
+        # 可选信息
+        optional_info = {}
+
+        if '玛娜' in display_items:
+            mana = client.data.gold.gold_id_free + client.data.gold.gold_id_pay
+            optional_info['玛娜'] = self._format_number(mana)
+
+        if '心碎' in display_items:
+            heart = client.data.get_inventory(db.heart)
+            xinsui = client.data.get_inventory(db.xinsui)
+            optional_info['心碎'] = f"{self._format_number(xinsui)}({self._format_number(heart)})"
+
+        if '星杯' in display_items:
+            star_cup = client.data.get_inventory(db.xingqiubei)
+            optional_info['星杯'] = self._format_number(star_cup)
+
+        if '星幽碎片' in display_items:
+            xinyou = client.data.get_inventory(db.xinyou)
+            optional_info['星幽碎片'] = self._format_number(xinyou)
+
+        if '属性球' in display_items:
+            fire = client.data.get_inventory(db.fire_ball)
+            water = client.data.get_inventory(db.water_ball)
+            wind = client.data.get_inventory(db.wind_ball)
+            sun = client.data.get_inventory(db.sun_ball)
+            dark = client.data.get_inventory(db.dark_ball)
+            optional_info['属性球'] = f"{self._format_number(fire)}/{self._format_number(water)}/{self._format_number(wind)}/{self._format_number(sun)}/{self._format_number(dark)}"
+
+        if '大师碎片' in display_items:
+            master = client.data.get_inventory(db.master_fragment)
+            master_f = client.data.get_inventory(db.master_ffragment)
+            optional_info['大师碎片'] = f"{self._format_number(master)}({self._format_number(master_f)})"
+
+        if '炼金点数' in display_items:
+            alces_pt = client.data.get_inventory(db.ex_rainbow_enhance_pt)
+            optional_info['炼金点数'] = self._format_number(alces_pt)
+
+        if '香水' in display_items:
+            perfume = client.data.get_inventory((eInventoryType.Item, 26203))
+            optional_info['香水'] = self._format_number(perfume)
+
+        if '扫荡券' in display_items:
+            sweep_ticket = client.data.get_inventory((eInventoryType.Item, 23001))
+            optional_info['扫荡券'] = self._format_number(sweep_ticket)
+
+        if '加速券' in display_items:
+            speed_ticket = client.data.get_inventory(db.travel_speed_up_paper)
+            optional_info['加速券'] = self._format_number(speed_ticket)
+
+        if '大师币' in display_items:
+            master_coin = client.data.get_inventory((eInventoryType.Item, 90008))
+            optional_info['大师币'] = self._format_number(master_coin)
+
+        if '连结币' in display_items:
+            link_coin = client.data.get_inventory((eInventoryType.Item, 99007))
+            optional_info['连结币'] = self._format_number(link_coin)
+
+        # 注释掉的琐碎物品（方便后续启用）
+        # if 'EX装备币' in display_items:
+        #     ex_weapon = client.data.get_inventory((eInventoryType.Item, 90009))
+        #     ex_armor = client.data.get_inventory((eInventoryType.Item, 90010))
+        #     ex_accessory = client.data.get_inventory((eInventoryType.Item, 90011))
+        #     optional_info['EX装备币'] = f"{self._format_number(ex_weapon)}/{self._format_number(ex_armor)}/{self._format_number(ex_accessory)}"
+
+        # if '商店币' in display_items:
+        #     dungeon_coin = client.data.get_inventory((eInventoryType.Item, 90002))
+        #     arena_coin = client.data.get_inventory((eInventoryType.Item, 90003))
+        #     grand_arena_coin = client.data.get_inventory((eInventoryType.Item, 90004))
+        #     clan_coin = client.data.get_inventory((eInventoryType.Item, 90006))
+        #     optional_info['商店币'] = f"{self._format_number(dungeon_coin)}/{self._format_number(arena_coin)}/{self._format_number(grand_arena_coin)}/{self._format_number(clan_coin)}"
+
+        # if '原矿' in display_items:
+        #     # 原矿 ID 范围通常是 35000-35999，按ID倒序
+        #     ores = [(item_id, client.data.get_inventory((eInventoryType.Item, item_id)))
+        #             for item_id in range(35999, 34999, -1)
+        #             if client.data.get_inventory((eInventoryType.Item, item_id)) > 0]
+        #     if ores:
+        #         optional_info['原矿'] = '/'.join(self._format_number(cnt) for _, cnt in ores)
+
+        # if '经验药剂' in display_items:
+        #     # 经验药剂 ID: 20001-20004，按ID倒序
+        #     exp_potions = [client.data.get_inventory((eInventoryType.Item, item_id))
+        #                    for item_id in range(20004, 20000, -1)]
+        #     optional_info['经验药剂'] = '/'.join(self._format_number(cnt) for cnt in exp_potions)
+
+        # if '精炼石' in display_items:
+        #     # 精炼石 ID: 22001-22006，按ID倒序
+        #     refine_stones = [client.data.get_inventory((eInventoryType.Item, item_id))
+        #                      for item_id in range(22006, 22000, -1)]
+        #     optional_info['精炼石'] = '/'.join(self._format_number(cnt) for cnt in refine_stones)
+
+        # if '好感礼物' in display_items:
+        #     # 蛋糕类 ID: 50001-50003，按ID倒序
+        #     cakes = [client.data.get_inventory((eInventoryType.Item, item_id))
+        #              for item_id in range(50003, 50000, -1)]
+        #     optional_info['好感礼物'] = '/'.join(self._format_number(cnt) for cnt in cakes)
+
+        # 输出格式
         if stamina >= max_stamina:
             self._warn(f"体力爆了！")
-        self._log(f"{name} 体力{stamina}({max_stamina}) 等级{level} 钻石{jewel}")
-        self._log(f"玛那{mana} 扫荡券{sweep_ticket} 母猪石{pig}")
-        self._log(f"全角色战力：{tot_power}")
+
+        # 第一行：固定信息
+        self._log(f"{name} 体力{stamina}({max_stamina}) 等级{level} 钻石{self._format_number(jewel)}")
+
+        # 第二行：可选信息（前两项）+ 母猪石
+        line2_items = []
+        keys = list(optional_info.keys())
+        for i in range(min(2, len(keys))):
+            line2_items.append(f"{keys[i]}{optional_info[keys[i]]}")
+        line2_items.append(f"母猪石{self._format_number(pig)}")
+        self._log(' '.join(line2_items))
+
+        # 第三行及以后：每行3个属性
+        remaining_keys = keys[2:]
+        for i in range(0, len(remaining_keys), 3):
+            line_items = []
+            for j in range(3):
+                if i + j < len(remaining_keys):
+                    key = remaining_keys[i + j]
+                    line_items.append(f"{key}{optional_info[key]}")
+            self._log(' '.join(line_items))
+
+        # 最后一行：全角色战力
+        self._log(f"全角色战力：{self._format_number(tot_power)}")
         self._log(f"已氪体数：{client.data.recover_stamina_exec_count}")
         self._log(f"清日常时间：{now}")
 
