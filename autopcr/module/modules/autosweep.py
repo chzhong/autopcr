@@ -3,8 +3,8 @@ from ..config import *
 from ...core.pcrclient import pcrclient
 from ...model.custom import ItemType
 from ...db.models import QuestDatum, ShioriQuest
-from typing import List, Dict, Tuple
 import typing
+from typing import Dict, List, Set, Tuple
 from ...model.error import *
 from ...db.database import db
 from ...model.enums import *
@@ -232,9 +232,64 @@ class simple_demand_sweep_base(Module):
     def get_need_quest(self, token: ItemType) -> List[QuestDatum]: ...
     def get_max_times(self, client: pcrclient, quest_id: int) -> int: ...
 
+    def _get_quest_stamina(self, quest_id: int) -> int:
+        """关卡表体力（备战预算用，与庆典减半等当日实际消耗无关）。"""
+        if quest_id in db.normal_quest_data:
+            return db.normal_quest_data[quest_id].stamina
+        elif quest_id in db.hard_quest_data:
+            return db.hard_quest_data[quest_id].stamina
+        elif quest_id in db.very_hard_quest_data:
+            return db.very_hard_quest_data[quest_id].stamina
+        elif quest_id in db.shiori_quest_data:
+            return db.shiori_quest_data[quest_id].stamina
+        return 0
+
+    def _stamina_budget_quest_ids(self, need_list: List[Tuple[ItemType, int]]) -> Set[int]:
+        """计入本模块「备战预算」的关卡 ID 集合。默认仅当前缺口涉及关卡；子类可扩大为同类全部门票关。"""
+        ids: Set[int] = set()
+        for token, _ in need_list:
+            for quest in self.get_need_quest(token):
+                ids.add(quest.quest_id)
+        return ids
+
+    def _calculate_consumed_stamina(self, client: pcrclient, quest_ids: Set[int]) -> int:
+        """
+        按关卡表体力 × 当日累计通关次数，估算本模块已占用的备战预算。
+
+        与 pcrclient.quest_skip_aware 一致：remain = daily_limit * (recovery_count + 1) - daily_clear_count，
+        daily_clear_count 为当日累计扫荡次数（重置后继续刷会累加，例如先刷满 3 次再重置再刷满则为 6）。
+        daily_recovery_count 只扩张当日次数上限，不是额外一次「消耗体力的扫荡」，故不参与乘法。
+        """
+        total_stamina = 0
+        for quest_id in quest_ids:
+            quest_info = client.data.quest_dict.get(quest_id)
+            if not quest_info:
+                continue
+            clears = quest_info.daily_clear_count or 0
+            quest_stamina = self._get_quest_stamina(quest_id)
+            if quest_stamina and clears:
+                total_stamina += clears * quest_stamina
+        return total_stamina
+
     async def do_task(self, client: pcrclient):
 
         need_list = await self.get_need_list(client)
+
+        # 备战预算：各模块按关卡表体力×次数封顶，与全局实际扣体（庆典等）无关，用于多模块间均分体力
+        stamina_limit_key = getattr(self, 'stamina_limit_key', None)
+        if stamina_limit_key:
+            stamina_limit = self.get_config(stamina_limit_key, 0)
+            if stamina_limit > 0:
+                all_quest_ids = self._stamina_budget_quest_ids(need_list)
+                consumed_stamina = self._calculate_consumed_stamina(client, all_quest_ids)
+                if consumed_stamina >= stamina_limit:
+                    raise SkipError(f"已消耗体力 {consumed_stamina} 达到上限 {stamina_limit}")
+            else:
+                stamina_limit = 0
+                consumed_stamina = 0
+        else:
+            stamina_limit = 0
+            consumed_stamina = 0
 
         stop = False
         clean_cnt = Counter()
@@ -247,7 +302,19 @@ class simple_demand_sweep_base(Module):
                         resp, clear_count, no_stamina = await client.quest_skip_aware(quest.quest_id, max_times, True, True)
                         if clear_count:
                             clean_cnt[quest.quest_id] += clear_count
-                        tmp.extend(resp) 
+                        tmp.extend(resp)
+
+                        # 刷取后累加消耗的体力并检查上限
+                        # 本次新增扫荡按关卡表体力计入预算（与庆典实际扣体无关）
+                        if stamina_limit > 0 and clear_count:
+                            quest_stamina = self._get_quest_stamina(quest.quest_id)
+                            if quest_stamina:
+                                consumed_stamina += clear_count * quest_stamina
+                            if consumed_stamina >= stamina_limit:
+                                stop = True
+                                self._log(f"已消耗体力 {consumed_stamina} 达到上限 {stamina_limit}")
+                                break
+
                         if no_stamina:
                             stop = True
                             if not clean_cnt: self._log(f"刷取{db.get_quest_name(quest.quest_id)}体力不足")
@@ -264,7 +331,7 @@ class simple_demand_sweep_base(Module):
                 if stop:
                     break
         except:
-            raise 
+            raise
         finally:
             if clean_cnt:
                 msg = '\n'.join(db.get_quest_name(quest) +
@@ -279,6 +346,7 @@ class simple_demand_sweep_base(Module):
                     raise SkipError()
 
 
+@inttype('hard_sweep_stamina_limit', "单项体力消耗上限(0为不限制)", 0, list(range(0, 601, 60)))
 @singlechoice('hard_sweep_gap_limit', "盈余阈值", 10, [0, 5, 10])
 @conditional_not_execution("hard_sweep_not_run_time", [])
 @conditional_execution1("hard_sweep_run_time", ["h庆典"])
@@ -289,6 +357,7 @@ class simple_demand_sweep_base(Module):
 @default(False)
 @tag_stamina_consume
 class smart_hard_sweep(simple_demand_sweep_base):
+    stamina_limit_key = 'hard_sweep_stamina_limit'
 
     async def get_need_list(self, client: pcrclient) -> List[Tuple[ItemType, int]]:
         gap_limit = self.get_config('hard_sweep_gap_limit')
@@ -307,9 +376,18 @@ class smart_hard_sweep(simple_demand_sweep_base):
     def get_need_quest(self, token: ItemType) -> List[QuestDatum]:
         return db.memory_hard_quest.get(token, [])
 
+    def _stamina_budget_quest_ids(self, need_list: List[Tuple[ItemType, int]]) -> Set[int]:
+        del need_list
+        ids: Set[int] = set()
+        for quests in db.memory_hard_quest.values():
+            for q in quests:
+                ids.add(q.quest_id)
+        return ids
+
     def get_max_times(self, client: pcrclient, quest_id: int) -> int:
         return 3
 
+@inttype('shiori_sweep_stamina_limit', "单项体力消耗上限(0为不限制)", 0, list(range(0, 601, 60)))
 @singlechoice('shiori_sweep_gap_limit', "盈余阈值", 10, [0, 5, 10])
 @conditional_not_execution("shiori_sweep_not_run_time", ["n3", 'n4及以上'])
 @conditional_execution1("shiori_sweep_run_time", ["无庆典"])
@@ -320,6 +398,7 @@ class smart_hard_sweep(simple_demand_sweep_base):
 @default(False)
 @tag_stamina_consume
 class smart_shiori_sweep(simple_demand_sweep_base):
+    stamina_limit_key = 'shiori_sweep_stamina_limit'
 
     async def get_need_list(self, client: pcrclient) -> List[Tuple[ItemType, int]]:
         gap_limit = self.get_config('shiori_sweep_gap_limit')
@@ -339,6 +418,17 @@ class smart_shiori_sweep(simple_demand_sweep_base):
 
     def get_need_quest(self, token: ItemType) -> List[ShioriQuest]:
         return db.memory_shiori_quest.get(token, [])
+
+    def _stamina_budget_quest_ids(self, need_list: List[Tuple[ItemType, int]]) -> Set[int]:
+        del need_list
+        ids: Set[int] = set()
+        only_limited = self.get_config('shiori_sweep_only_consider_limit_unit')
+        for token, quests in db.memory_shiori_quest.items():
+            if only_limited and not db.unit_data[db.memory_to_unit[token[1]]].is_limited:
+                continue
+            for q in quests:
+                ids.add(q.quest_id)
+        return ids
 
     def get_max_times(self, client: pcrclient, quest_id: int) -> int:
         return 5
@@ -401,12 +491,14 @@ unique_equip_2_pure_memory_id = [
         116701, # 工菜
         116901, # 电子龙
 ]
+@inttype('very_hard_sweep_stamina_limit', "单项体力消耗上限(0为不限制)", 0, list(range(0, 601, 60)))
 @conditional_execution1("very_hard_sweep_run_time", ["vh庆典"])
 @description('储备专二需求的150碎片（目标角色见模块内 `unique_equip_2_pure_memory_id`）')
 @name('专二纯净碎片储备')
 @default(False)
 @tag_stamina_consume
 class mirai_very_hard_sweep(simple_demand_sweep_base):
+    stamina_limit_key = 'very_hard_sweep_stamina_limit'
     async def get_need_list(self, client: pcrclient) -> List[Tuple[ItemType, int]]:
         pure_gap = client.data.get_pure_memory_demand_gap()
         target = Counter()
@@ -428,6 +520,15 @@ class mirai_very_hard_sweep(simple_demand_sweep_base):
             if unit in db.unit_to_pure_memory:
                 ret += db.pure_memory_quest.get(db.unit_to_pure_memory[unit], [])
         return ret
+
+    def _stamina_budget_quest_ids(self, need_list: List[Tuple[ItemType, int]]) -> Set[int]:
+        del need_list
+        ids: Set[int] = set()
+        for unit in unique_equip_2_pure_memory_id:
+            kana = db.unit_data[unit].kana
+            for q in self.get_need_quest((0, kana)):
+                ids.add(q.quest_id)
+        return ids
 
     def get_max_times(self, client: pcrclient, quest_id: int) -> int:
         return 5 if db.is_shiori_quest(quest_id) else 3
