@@ -10,7 +10,6 @@ from ...db.database import db
 from ...model.enums import *
 from collections import Counter
 from ...core.apiclient import apiclient
-from ...util.logger import instance as logger
 
 @conditional_execution1("lazy_sweep_run_time", ["n庆典"])
 @singlechoice("lazy_sweep_strategy", "刷取策略", "刷最缺", ["刷最缺", "均匀刷"])
@@ -301,38 +300,15 @@ class limited_demand_sweep_base(simple_demand_sweep_base):
     def _limit_reached_msg(self, consumed: int, sweep_limit: int) -> str:
         return f"已刷取 {consumed} 次达到上限 {sweep_limit}"
 
-    def _sweep_limit_log(self, msg: str, *args):
-        logger.info(f"[{self.key}] {msg}", *args)
-
-    def _sweep_limit_log_debug(self, msg: str, *args):
-        logger.debug(f"[{self.key}] {msg}", *args)
-
-    def _log_budget_clears(self, client: pcrclient, quest_ids: Set[int]) -> None:
-        parts = []
-        for quest_id in sorted(quest_ids):
-            qinfo = client.data.quest_dict.get(quest_id)
-            clears = (qinfo.daily_clear_count or 0) if qinfo else 0
-            if clears:
-                parts.append(f"{quest_id}({db.get_quest_name(quest_id)})={clears}")
-        if parts:
-            self._sweep_limit_log_debug("budget clears detail: %s", ", ".join(parts))
-
     async def do_task(self, client: pcrclient):
         sweep_limit = self.get_config(self.sweep_limit_key) if self.sweep_limit_key else 0
         if sweep_limit <= 0:
-            self._sweep_limit_log_debug("daily limit disabled (0), delegate to simple_demand_sweep_base")
             return await super().do_task(client)
 
         need_list = await self.get_need_list(client)
         budget_quest_ids = self._sweep_budget_quest_ids(need_list)
         consumed_clears = self._calculate_consumed_clears(client, budget_quest_ids)
-        self._sweep_limit_log(
-            "daily limit check: limit=%s, budget_quests=%s, consumed=%s, need_items=%s",
-            sweep_limit, len(budget_quest_ids), consumed_clears, len(need_list))
-        self._log_budget_clears(client, budget_quest_ids)
         if consumed_clears >= sweep_limit:
-            self._sweep_limit_log(
-                "skip at entry: consumed=%s >= limit=%s", consumed_clears, sweep_limit)
             raise SkipError(self._limit_reached_msg(consumed_clears, sweep_limit))
 
         stop = False
@@ -344,8 +320,6 @@ class limited_demand_sweep_base(simple_demand_sweep_base):
                     remaining = sweep_limit - consumed_clears
                     if remaining <= 0:
                         stop = True
-                        self._sweep_limit_log(
-                            "stop before sweep: consumed=%s >= limit=%s", consumed_clears, sweep_limit)
                         self._log(self._limit_reached_msg(consumed_clears, sweep_limit))
                         break
 
@@ -354,45 +328,25 @@ class limited_demand_sweep_base(simple_demand_sweep_base):
                     current = (qinfo.daily_clear_count or 0) if qinfo else 0
                     effective_times = min(max_times, current + remaining)
                     if effective_times <= current:
-                        self._sweep_limit_log_debug(
-                            "skip quest %s(%s): current=%s, max_times=%s, remaining=%s",
-                            quest.quest_id, db.get_quest_name(quest.quest_id),
-                            current, max_times, remaining)
                         continue
 
-                    self._sweep_limit_log(
-                        "sweep quest %s(%s): current=%s, target=%s, max_times=%s, remaining=%s",
-                        quest.quest_id, db.get_quest_name(quest.quest_id),
-                        current, effective_times, max_times, remaining)
                     try:
                         resp, clear_count, no_stamina = await client.quest_skip_aware(
                             quest.quest_id, effective_times, True, True)
                         if clear_count:
                             clean_cnt[quest.quest_id] += clear_count
                             consumed_clears += clear_count
-                        self._sweep_limit_log(
-                            "sweep done quest %s(%s): clear_count=%s, consumed=%s/%s, no_stamina=%s",
-                            quest.quest_id, db.get_quest_name(quest.quest_id),
-                            clear_count, consumed_clears, sweep_limit, no_stamina)
                         tmp.extend(resp)
                         if consumed_clears >= sweep_limit:
                             stop = True
-                            self._sweep_limit_log(
-                                "stop after sweep: consumed=%s >= limit=%s",
-                                consumed_clears, sweep_limit)
                             self._log(self._limit_reached_msg(consumed_clears, sweep_limit))
                             break
                         if no_stamina:
                             stop = True
-                            self._sweep_limit_log("stop: no stamina at quest %s(%s)",
-                                quest.quest_id, db.get_quest_name(quest.quest_id))
                             if not clean_cnt:
                                 self._log(f"刷取{db.get_quest_name(quest.quest_id)}体力不足")
                             break
                     except SkipError:
-                        self._sweep_limit_log_debug(
-                            "quest_skip_aware SkipError quest %s(%s)",
-                            quest.quest_id, db.get_quest_name(quest.quest_id))
                         pass
                     except AbortError as e:
                         if str(e).endswith("未通关或不存在") or str(e).endswith("未三星"):
@@ -407,7 +361,6 @@ class limited_demand_sweep_base(simple_demand_sweep_base):
             raise
         finally:
             if clean_cnt:
-                self._sweep_limit_log("run finished: swept %s", dict(clean_cnt))
                 msg = '\n'.join(db.get_quest_name(quest) +
                 f": 刷取{cnt}次" for quest, cnt in clean_cnt.items())
                 self._log(msg)
@@ -416,7 +369,6 @@ class limited_demand_sweep_base(simple_demand_sweep_base):
                     self._log(await client.serialize_reward_summary(tmp))
             else:
                 if not self.is_warn:
-                    self._sweep_limit_log("run finished: no sweep performed")
                     self._log("需刷取的图均无次数")
                     raise SkipError()
 
