@@ -3,13 +3,14 @@ from ..config import *
 from ...core.pcrclient import pcrclient
 from ...model.custom import ItemType
 from ...db.models import QuestDatum, ShioriQuest
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Set
 import typing
 from ...model.error import *
 from ...db.database import db
 from ...model.enums import *
 from collections import Counter
 from ...core.apiclient import apiclient
+from ...util.logger import instance as logger
 
 @conditional_execution1("lazy_sweep_run_time", ["n庆典"])
 @singlechoice("lazy_sweep_strategy", "刷取策略", "刷最缺", ["刷最缺", "均匀刷"])
@@ -279,6 +280,152 @@ class simple_demand_sweep_base(Module):
                     raise SkipError()
 
 
+class limited_demand_sweep_base(simple_demand_sweep_base):
+    sweep_limit_key = None
+
+    def _sweep_budget_quest_ids(self, need_list: List[Tuple[ItemType, int]]) -> Set[int]:
+        ids = set()
+        for token, _ in need_list:
+            for quest in self.get_need_quest(token):
+                ids.add(quest.quest_id)
+        return ids
+
+    def _calculate_consumed_clears(self, client: pcrclient, quest_ids: Set[int]) -> int:
+        total = 0
+        for quest_id in quest_ids:
+            qinfo = client.data.quest_dict.get(quest_id)
+            if qinfo:
+                total += qinfo.daily_clear_count or 0
+        return total
+
+    def _limit_reached_msg(self, consumed: int, sweep_limit: int) -> str:
+        return f"已刷取 {consumed} 次达到上限 {sweep_limit}"
+
+    def _sweep_limit_log(self, msg: str, *args):
+        logger.info(f"[{self.key}] {msg}", *args)
+
+    def _sweep_limit_log_debug(self, msg: str, *args):
+        logger.debug(f"[{self.key}] {msg}", *args)
+
+    def _log_budget_clears(self, client: pcrclient, quest_ids: Set[int]) -> None:
+        parts = []
+        for quest_id in sorted(quest_ids):
+            qinfo = client.data.quest_dict.get(quest_id)
+            clears = (qinfo.daily_clear_count or 0) if qinfo else 0
+            if clears:
+                parts.append(f"{quest_id}({db.get_quest_name(quest_id)})={clears}")
+        if parts:
+            self._sweep_limit_log_debug("budget clears detail: %s", ", ".join(parts))
+
+    async def do_task(self, client: pcrclient):
+        sweep_limit = self.get_config(self.sweep_limit_key) if self.sweep_limit_key else 0
+        if sweep_limit <= 0:
+            self._sweep_limit_log_debug("daily limit disabled (0), delegate to simple_demand_sweep_base")
+            return await super().do_task(client)
+
+        need_list = await self.get_need_list(client)
+        budget_quest_ids = self._sweep_budget_quest_ids(need_list)
+        consumed_clears = self._calculate_consumed_clears(client, budget_quest_ids)
+        self._sweep_limit_log(
+            "daily limit check: limit=%s, budget_quests=%s, consumed=%s, need_items=%s",
+            sweep_limit, len(budget_quest_ids), consumed_clears, len(need_list))
+        self._log_budget_clears(client, budget_quest_ids)
+        if consumed_clears >= sweep_limit:
+            self._sweep_limit_log(
+                "skip at entry: consumed=%s >= limit=%s", consumed_clears, sweep_limit)
+            raise SkipError(self._limit_reached_msg(consumed_clears, sweep_limit))
+
+        stop = False
+        clean_cnt = Counter()
+        tmp = []
+        try:
+            for token, _ in need_list:
+                for quest in self.get_need_quest(token):
+                    remaining = sweep_limit - consumed_clears
+                    if remaining <= 0:
+                        stop = True
+                        self._sweep_limit_log(
+                            "stop before sweep: consumed=%s >= limit=%s", consumed_clears, sweep_limit)
+                        self._log(self._limit_reached_msg(consumed_clears, sweep_limit))
+                        break
+
+                    max_times = self.get_max_times(client, quest.quest_id)
+                    qinfo = client.data.quest_dict.get(quest.quest_id)
+                    current = (qinfo.daily_clear_count or 0) if qinfo else 0
+                    effective_times = min(max_times, current + remaining)
+                    if effective_times <= current:
+                        self._sweep_limit_log_debug(
+                            "skip quest %s(%s): current=%s, max_times=%s, remaining=%s",
+                            quest.quest_id, db.get_quest_name(quest.quest_id),
+                            current, max_times, remaining)
+                        continue
+
+                    self._sweep_limit_log(
+                        "sweep quest %s(%s): current=%s, target=%s, max_times=%s, remaining=%s",
+                        quest.quest_id, db.get_quest_name(quest.quest_id),
+                        current, effective_times, max_times, remaining)
+                    try:
+                        resp, clear_count, no_stamina = await client.quest_skip_aware(
+                            quest.quest_id, effective_times, True, True)
+                        if clear_count:
+                            clean_cnt[quest.quest_id] += clear_count
+                            consumed_clears += clear_count
+                        self._sweep_limit_log(
+                            "sweep done quest %s(%s): clear_count=%s, consumed=%s/%s, no_stamina=%s",
+                            quest.quest_id, db.get_quest_name(quest.quest_id),
+                            clear_count, consumed_clears, sweep_limit, no_stamina)
+                        tmp.extend(resp)
+                        if consumed_clears >= sweep_limit:
+                            stop = True
+                            self._sweep_limit_log(
+                                "stop after sweep: consumed=%s >= limit=%s",
+                                consumed_clears, sweep_limit)
+                            self._log(self._limit_reached_msg(consumed_clears, sweep_limit))
+                            break
+                        if no_stamina:
+                            stop = True
+                            self._sweep_limit_log("stop: no stamina at quest %s(%s)",
+                                quest.quest_id, db.get_quest_name(quest.quest_id))
+                            if not clean_cnt:
+                                self._log(f"刷取{db.get_quest_name(quest.quest_id)}体力不足")
+                            break
+                    except SkipError:
+                        self._sweep_limit_log_debug(
+                            "quest_skip_aware SkipError quest %s(%s)",
+                            quest.quest_id, db.get_quest_name(quest.quest_id))
+                        pass
+                    except AbortError as e:
+                        if str(e).endswith("未通关或不存在") or str(e).endswith("未三星"):
+                            self._warn(f"{db.get_inventory_name_san(token)}: {str(e)}")
+                        else:
+                            self._log(str(e))
+                            raise AbortError()
+                        break
+                if stop:
+                    break
+        except:
+            raise
+        finally:
+            if clean_cnt:
+                self._sweep_limit_log("run finished: swept %s", dict(clean_cnt))
+                msg = '\n'.join(db.get_quest_name(quest) +
+                f": 刷取{cnt}次" for quest, cnt in clean_cnt.items())
+                self._log(msg)
+                self._log("---------")
+                if tmp:
+                    self._log(await client.serialize_reward_summary(tmp))
+            else:
+                if not self.is_warn:
+                    self._sweep_limit_log("run finished: no sweep performed")
+                    self._log("需刷取的图均无次数")
+                    raise SkipError()
+
+
+_HARD_SWEEP_LIMIT_CANDIDATES = list(range(0, 31, 3))
+_SHIORI_SWEEP_LIMIT_CANDIDATES = list(range(0, 61, 5))
+
+
+@inttype('hard_sweep_daily_limit', "单项刷取次数上限(0为不限制)", 0, _HARD_SWEEP_LIMIT_CANDIDATES)
 @singlechoice('hard_sweep_gap_limit', "盈余阈值", 10, [0, 5, 10])
 @conditional_not_execution("hard_sweep_not_run_time", [])
 @conditional_execution1("hard_sweep_run_time", ["h庆典"])
@@ -288,7 +435,8 @@ class simple_demand_sweep_base(Module):
 @name('智能刷hard图')
 @default(False)
 @tag_stamina_consume
-class smart_hard_sweep(simple_demand_sweep_base):
+class smart_hard_sweep(limited_demand_sweep_base):
+    sweep_limit_key = 'hard_sweep_daily_limit'
 
     async def get_need_list(self, client: pcrclient) -> List[Tuple[ItemType, int]]:
         gap_limit = self.get_config('hard_sweep_gap_limit')
@@ -307,9 +455,18 @@ class smart_hard_sweep(simple_demand_sweep_base):
     def get_need_quest(self, token: ItemType) -> List[QuestDatum]:
         return db.memory_hard_quest.get(token, [])
 
+    def _sweep_budget_quest_ids(self, need_list: List[Tuple[ItemType, int]]) -> Set[int]:
+        del need_list
+        ids = set()
+        for quests in db.memory_hard_quest.values():
+            for q in quests:
+                ids.add(q.quest_id)
+        return ids
+
     def get_max_times(self, client: pcrclient, quest_id: int) -> int:
         return 3
 
+@inttype('shiori_sweep_daily_limit', "单项刷取次数上限(0为不限制)", 0, _SHIORI_SWEEP_LIMIT_CANDIDATES)
 @singlechoice('shiori_sweep_gap_limit', "盈余阈值", 10, [0, 5, 10])
 @conditional_not_execution("shiori_sweep_not_run_time", ["n3", 'n4及以上'])
 @conditional_execution1("shiori_sweep_run_time", ["无庆典"])
@@ -319,7 +476,8 @@ class smart_hard_sweep(simple_demand_sweep_base):
 @name('智能刷外传图')
 @default(False)
 @tag_stamina_consume
-class smart_shiori_sweep(simple_demand_sweep_base):
+class smart_shiori_sweep(limited_demand_sweep_base):
+    sweep_limit_key = 'shiori_sweep_daily_limit'
 
     async def get_need_list(self, client: pcrclient) -> List[Tuple[ItemType, int]]:
         gap_limit = self.get_config('shiori_sweep_gap_limit')
@@ -339,6 +497,17 @@ class smart_shiori_sweep(simple_demand_sweep_base):
 
     def get_need_quest(self, token: ItemType) -> List[ShioriQuest]:
         return db.memory_shiori_quest.get(token, [])
+
+    def _sweep_budget_quest_ids(self, need_list: List[Tuple[ItemType, int]]) -> Set[int]:
+        del need_list
+        only_limited = self.get_config('shiori_sweep_only_consider_limit_unit')
+        ids = set()
+        for token, quests in db.memory_shiori_quest.items():
+            if only_limited and not db.unit_data[db.memory_to_unit[token[1]]].is_limited:
+                continue
+            for q in quests:
+                ids.add(q.quest_id)
+        return ids
 
     def get_max_times(self, client: pcrclient, quest_id: int) -> int:
         return 5
@@ -403,12 +572,14 @@ unique_equip_2_pure_memory_id = [
         107601, # 水妈
         107801, # 水黑
 ]
+@inttype('very_hard_sweep_daily_limit', "单项刷取次数上限(0为不限制)", 0, _HARD_SWEEP_LIMIT_CANDIDATES)
 @conditional_execution1("very_hard_sweep_run_time", ["vh庆典"])
 @description('储备专二需求的150碎片' + ','.join(db.get_unit_name(unit_id) for unit_id in unique_equip_2_pure_memory_id))
 @name('专二纯净碎片储备')
 @default(False)
 @tag_stamina_consume
-class mirai_very_hard_sweep(simple_demand_sweep_base):
+class mirai_very_hard_sweep(limited_demand_sweep_base):
+    sweep_limit_key = 'very_hard_sweep_daily_limit'
     async def get_need_list(self, client: pcrclient) -> List[Tuple[ItemType, int]]:
         pure_gap = client.data.get_pure_memory_demand_gap()
         target = Counter()
@@ -430,6 +601,15 @@ class mirai_very_hard_sweep(simple_demand_sweep_base):
             if unit in db.unit_to_pure_memory:
                 ret += db.pure_memory_quest.get(db.unit_to_pure_memory[unit], [])
         return ret
+
+    def _sweep_budget_quest_ids(self, need_list: List[Tuple[ItemType, int]]) -> Set[int]:
+        del need_list
+        ids = set()
+        for unit in unique_equip_2_pure_memory_id:
+            kana = db.unit_data[unit].kana
+            for q in self.get_need_quest((0, kana)):
+                ids.add(q.quest_id)
+        return ids
 
     def get_max_times(self, client: pcrclient, quest_id: int) -> int:
         return 5 if db.is_shiori_quest(quest_id) else 3
@@ -490,13 +670,15 @@ class UniqueEquip1SPMemory():
             if _type is None or (t & _type) == _type:
                 yield unit_id
 
+@inttype('mirai_sp1_h_sweep_daily_limit', "单项刷取次数上限(0为不限制)", 0, _HARD_SWEEP_LIMIT_CANDIDATES)
 @conditional_not_execution("mirai_sp1_h_sweep_not_run_time", [])
 @conditional_execution1("mirai_sp1_h_sweep_run_time", ["h庆典"])
 @description('储备专一SP需求的300碎片' + ','.join(db.get_unit_name(unit_id) for unit_id in UniqueEquip1SPMemory.get_unit_demand(UniqueEquip1SPMemory.Type.Sweep)))
 @name('专一SP碎片储备(H本)')
 @default(False)
 @tag_stamina_consume
-class mirai_sp1_h_sweep(simple_demand_sweep_base):
+class mirai_sp1_h_sweep(limited_demand_sweep_base):
+    sweep_limit_key = 'mirai_sp1_h_sweep_daily_limit'
 
     async def get_need_list(self, client: pcrclient) -> List[Tuple[ItemType, int]]:
         memory_gap = client.data.get_memory_demand_gap()
@@ -514,16 +696,27 @@ class mirai_sp1_h_sweep(simple_demand_sweep_base):
     def get_need_quest(self, token: ItemType) -> List[QuestDatum]:
         return db.memory_hard_quest.get(token, [])
 
+    def _sweep_budget_quest_ids(self, need_list: List[Tuple[ItemType, int]]) -> Set[int]:
+        del need_list
+        ids = set()
+        for unit in UniqueEquip1SPMemory.get_unit_demand(UniqueEquip1SPMemory.Type.Sweep):
+            token = (eInventoryType.Item, db.unit_to_memory[unit])
+            for q in db.memory_hard_quest.get(token, []):
+                ids.add(q.quest_id)
+        return ids
+
     def get_max_times(self, client: pcrclient, quest_id: int) -> int:
         return 3
 
+@inttype('mirai_sp1_shiori_sweep_daily_limit', "单项刷取次数上限(0为不限制)", 0, _SHIORI_SWEEP_LIMIT_CANDIDATES)
 @conditional_not_execution("mirai_sp1_shiori_sweep_not_run_time", ["n3", 'n4及以上'])
 @conditional_execution1("mirai_sp1_shiori_sweep_run_time", ["无庆典"])
 @description('储备专一SP需求的300碎片' + ','.join(db.get_unit_name(unit_id) for unit_id in UniqueEquip1SPMemory.get_unit_demand(UniqueEquip1SPMemory.Type.Sweep)))
 @name('专一SP碎片储备(外传)')
 @default(False)
 @tag_stamina_consume
-class mirai_sp1_shiori_sweep(simple_demand_sweep_base):
+class mirai_sp1_shiori_sweep(limited_demand_sweep_base):
+    sweep_limit_key = 'mirai_sp1_shiori_sweep_daily_limit'
 
     async def get_need_list(self, client: pcrclient) -> List[Tuple[ItemType, int]]:
         memory_gap = client.data.get_memory_demand_gap()
@@ -540,6 +733,15 @@ class mirai_sp1_shiori_sweep(simple_demand_sweep_base):
 
     def get_need_quest(self, token: ItemType) -> List[QuestDatum]:
         return db.memory_shiori_quest.get(token, [])
+
+    def _sweep_budget_quest_ids(self, need_list: List[Tuple[ItemType, int]]) -> Set[int]:
+        del need_list
+        ids = set()
+        for unit in UniqueEquip1SPMemory.get_unit_demand(UniqueEquip1SPMemory.Type.Sweep):
+            token = (eInventoryType.Item, db.unit_to_memory[unit])
+            for q in db.memory_shiori_quest.get(token, []):
+                ids.add(q.quest_id)
+        return ids
 
     def get_max_times(self, client: pcrclient, quest_id: int) -> int:
         return 5
