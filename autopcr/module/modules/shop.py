@@ -1,14 +1,17 @@
 from abc import abstractmethod
 from collections import Counter
-from typing import List
+from dataclasses import dataclass
+from typing import List, Tuple
 
 from ...model.common import ShopInfo
+from ...model.custom import ItemType
 from ..modulebase import *
 from ..config import *
 from ...core.pcrclient import pcrclient
 from ...model.error import *
 from ...db.database import db
 from ...model.enums import *
+from .sync_growth import build_sync_growth_plan
 
 class shop_buyer(Module):
     def _get_count(self, name: str, key: str) -> int:
@@ -169,6 +172,125 @@ class underground_shop(shop_buyer):
     def buy_kind(self) -> List[str]: return self.get_config('underground_shop_buy_kind')
     def require_equip_units_fav(self) -> bool: return self.get_config('underground_shop_buy_equip_consider_unit_fav')
     def require_equip_units_rank(self) -> str: return self.get_config('underground_shop_buy_equip_consider_unit_rank')
+
+
+@dataclass
+class SyncGrowthEquipGroup:
+    items: Tuple[ItemType, ...]
+    target_count: int
+
+
+class sync_growth_shop_buyer(shop_buyer):
+    def _unit_memory_count(self):
+        return -999999
+
+    def _get_sync_growth_equip_targets(self, client: pcrclient) -> List[SyncGrowthEquipGroup]:
+        _, _, steps = build_sync_growth_plan(client)
+        demand_groups = Counter()
+        for step in steps:
+            for group in step.candidate_groups:
+                if group.demand > 0:
+                    demand_groups[tuple(group.items)] += group.demand
+
+        return [
+            SyncGrowthEquipGroup(items, target_count)
+            for items, target_count in demand_groups.items()
+        ]
+
+    def _get_group_inventory(self, client: pcrclient, group: SyncGrowthEquipGroup) -> int:
+        return sum(client.data.get_inventory(item) for item in group.items)
+
+    def _log_sync_growth_targets(self, equip_groups: List[SyncGrowthEquipGroup], client: pcrclient):
+        if not equip_groups:
+            return
+        for idx, group in enumerate(equip_groups, start=1):
+            current = self._get_group_inventory(client, group)
+            if current >= group.target_count:
+                continue
+            names = "，".join(
+                f"{db.get_inventory_name_san(item)}{client.data.get_inventory(item)}"
+                for item in group.items
+            )
+            self._log(
+                f"同步器候选购装{idx}：{names}；合计{current}/{group.target_count}，缺口{group.target_count - current}"
+            )
+
+    async def do_task(self, client: pcrclient):
+        lmt = self.coin_limit()
+        reset_cnt = self.reset_count()
+
+        shop_content = await self._get_shop(client)
+
+        prev = client.data.get_shop_gold(shop_content.system_id)
+        old_reset_cnt = shop_content.reset_count
+        result = []
+        equip_groups = self._get_sync_growth_equip_targets(client)
+        self._log_sync_growth_targets(equip_groups, client)
+
+        while True:
+            gold = client.data.get_shop_gold(shop_content.system_id)
+            if gold < lmt:
+                raise SkipError(f"商店货币{gold}不足{lmt}，将不进行购买")
+
+            target = [
+                (item.slot_id, item.price.currency_num)
+                for item in shop_content.item_list
+                if not item.sold and db.is_equip((item.type, item.item_id)) and any(
+                    (item.type, item.item_id) in group.items and
+                    self._get_group_inventory(client, group) < group.target_count
+                    for group in equip_groups
+                )
+            ]
+
+            if len(target) == 0 and all(
+                self._get_group_inventory(client, group) >= group.target_count
+                for group in equip_groups
+            ):
+                self._log('当前已无同步器缺口装备需求，停止购买')
+                break
+
+            slots_to_buy = [item[0] for item in target]
+            cost_gold = sum(item[1] for item in target)
+
+            if cost_gold > gold:
+                self._log(f"商店货币{gold}不足购买需求的{cost_gold}，停止购买")
+                break
+
+            if slots_to_buy:
+                res = await client.shop_buy_item(shop_content.system_id, slots_to_buy)
+                gold -= cost_gold
+                result.extend(res.purchase_list)
+
+            if shop_content.reset_count >= reset_cnt:
+                self._log(f"商店已重置{shop_content.reset_count}次，停止购买")
+                break
+
+            if gold < shop_content.reset_cost:
+                self._log(f"商店货币{gold}不足重置{shop_content.reset_cost}，停止购买")
+                break
+
+            await client.shop_reset(shop_content.system_id)
+            shop_content = await self._get_shop(client)
+
+        cost_gold = prev - client.data.get_shop_gold(shop_content.system_id)
+        if cost_gold == 0:
+            raise SkipError("无对应商品购买")
+        else:
+            self._log(f"花费了{cost_gold}货币，重置了{shop_content.reset_count - old_reset_cnt}次，购买了")
+            msg = await client.serialize_reward_summary(result)
+            self._log(msg)
+
+
+@singlechoice('sync_growth_underground_shop_buy_coin_limit', "货币阈值", 10000, [0, 10000, 50000, 100000, 200000])
+@inttype('sync_growth_underground_shop_reset_count', "重置次数(<=200)", 0, [i for i in range(201)])
+@name('同步器地下城购装')
+@description('按同步器满强化规划购买地下城商店装备，只在需要新拉角色时手动执行')
+@default(False)
+class sync_growth_underground_shop(sync_growth_shop_buyer):
+    def coin_limit(self) -> int: return self.get_config('sync_growth_underground_shop_buy_coin_limit')
+    def system_id(self) -> eSystemId: return eSystemId.EXPEDITION_SHOP
+    def reset_count(self) -> int: return self.get_config('sync_growth_underground_shop_reset_count')
+    def buy_kind(self) -> List[str]: return ['装备']
 
 @singlechoice('jjc_shop_buy_memory_count_limit', "记忆碎片盈余值", 0, [0, 10, 20, 120, 270, 9900])
 @singlechoice('jjc_shop_buy_equip_count_limit', "装备盈余值", 0, [0, 20, 50, 100, 200, 500, 9900])

@@ -9,6 +9,7 @@ from .clan import *
 from .cron import *
 from .daily import *
 from .exequip import *
+from .exequip_cleanup import *
 from .gacha import *
 from .hatsune import *
 from .labyrinth import *
@@ -23,6 +24,7 @@ from .travel import *
 from .unit import *
 from .talent import *
 from .mirage import *
+from .sync_growth import *
 
 @dataclass
 class ModuleList:
@@ -169,6 +171,8 @@ unit_modules = ModuleList(
         missing_unit,
         refresh_box,
         unit_promote,
+        sync_growth,
+        sync_growth_underground_shop,
         unit_memory_buy,
         unit_set_unique_equip_growth,
         unit_exceed,
@@ -205,6 +209,7 @@ tool_modules = ModuleList(
     [
         labyrinth_start_reroll,
         ex_equip_rainbow_enchance,
+        ex_equip_cleanup_execute,
         ex_equip_power_maximun,
         set_my_party2,
         find_talent_quest,
@@ -226,6 +231,9 @@ tool_modules = ModuleList(
         remove_cb_ex_equip,
         remove_cb_support,
         redeem_unit_swap,
+
+        remove_normal_ex_equip,
+        calc_best_3star_ex_equip,
 
         jjc_info,
         pjjc_info,
