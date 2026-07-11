@@ -523,6 +523,8 @@ unique_equip_2_pure_memory_id = [
         116901, # 电子龙
         107601, # 水妈
         107801, # 水黑
+        115501, # 礼妈
+        115601, # 礼衣
 ]
 @inttype('very_hard_sweep_daily_limit', "单项刷取次数上限(0为不限制)", 0, _HARD_SWEEP_LIMIT_CANDIDATES)
 @conditional_execution1("very_hard_sweep_run_time", ["vh庆典"])
