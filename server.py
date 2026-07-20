@@ -68,6 +68,7 @@ sv_help = f"""
 - {prefix}查深域 查询深域通关情况
 - {prefix}查公会深域 查询公会深域通关情况
 - {prefix}黎明界开局 <美食殿堂|破晓之星|咲恋救济院|王宫骑士团|拉比林斯> 可以只打部分字
+- {prefix}黎明界刷开局 <公会名称|编号> [难度 [完美 [最多重开次数]]] 难度默认5(1-5)，写「完美」才刷完美开局，次数默认100(50-2000)。Boss与区域3/5第3格等需在网页「黎明界刷开局」设置
 - {prefix}刷图推荐 [<rank>] [fav] 查询缺口装备的刷图推荐，格式同上
 - {prefix}公会支援 查询公会支援角色配置
 - {prefix}卡池 查看当前卡池
@@ -421,7 +422,7 @@ def wrap_tool(func):
         msg = await botev.message()
         tool = msg[0] if msg else ""
 
-        for tool_name in tool_info:
+        for tool_name in sorted(tool_info, key=len, reverse=True):
             if tool.startswith(tool_name):
                 tool = tool_name
                 msg[0] = msg[0].lstrip(tool_name)
@@ -1022,22 +1023,75 @@ async def half_schedule(botev: BotEvent):
 # async def return_jewel(botev: BotEvent):
     # return {}
 
+def _labyrinth_guild_list_text() -> str:
+    lines = []
+    for guild in db.labyrinth_enter_guild.values():
+        name = guild.guild_name.replace(r"\n", "")
+        lines.append(f"{name}({guild.guild_id})")
+    return "\n".join(lines)
+
+def _resolve_labyrinth_guild_by_name(token: str) -> int:
+    for guild in db.labyrinth_enter_guild.values():
+        if token in guild.guild_name.replace(r"\n", ""):
+            return guild.guild_id
+    return 0
+
+def _resolve_labyrinth_guild(token: str) -> int:
+    if token.isdigit():
+        guild_id = int(token)
+        if guild_id in db.labyrinth_enter_guild:
+            return guild_id
+    return _resolve_labyrinth_guild_by_name(token)
+
 @register_tool("黎明界开局", "labyrinth_start_reroll")
 async def labyrinth_start_reroll(botev: BotEvent):
     guild_id = 0
     msg = await botev.message()
     try:
-        for guild in db.labyrinth_enter_guild.values():
-            if msg[0] in guild.guild_name.replace(r"\n", ""):
-                guild_id = guild.guild_id
-                del msg[0]
-                break
+        guild_id = _resolve_labyrinth_guild_by_name(msg[0])
+        if guild_id:
+            del msg[0]
     except:
         pass
     if guild_id == 0:
         await botev.finish(f"未找到公会，请输入包含以下公会名字：" + "\n".join([guild.guild_name.replace(r"\n", "") for guild in db.labyrinth_enter_guild.values()]))
     return {
             "labyrinth_reroll_guild_id": guild_id,
+    }
+
+@register_tool("黎明界刷开局", "labyrinth_start_reroll")
+async def labyrinth_start_reroll_ex(botev: BotEvent):
+    msg = await botev.message()
+    if not msg:
+        await botev.finish(f"请指定公会名称或编号：\n{_labyrinth_guild_list_text()}")
+
+    guild_id = _resolve_labyrinth_guild(msg[0])
+    if guild_id == 0:
+        await botev.finish(f"未找到公会，请输入公会名称或编号：\n{_labyrinth_guild_list_text()}")
+    del msg[0]
+
+    difficulty = 5
+    if msg and msg[0].isdigit() and 1 <= int(msg[0]) <= 5:
+        difficulty = int(msg[0])
+        del msg[0]
+
+    perfect_start = False
+    if msg and msg[0] == "完美":
+        perfect_start = True
+        del msg[0]
+
+    max_count = 100
+    if msg and msg[0].isdigit():
+        max_count = int(msg[0])
+        if max_count < 50 or max_count > 2000:
+            await botev.finish("最多重开次数需在50-2000之间")
+        del msg[0]
+
+    return {
+        "labyrinth_reroll_guild_id": guild_id,
+        "labyrinth_reroll_difficulty": difficulty,
+        "labyrinth_reroll_perfect_start": perfect_start,
+        "labyrinth_reroll_max_count": max_count,
     }
 
 @register_tool("查深域", "find_talent_quest")
