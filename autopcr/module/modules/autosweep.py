@@ -943,6 +943,7 @@ class daily_quest_mission(Module):
             self._warn(f"体力不足，每日关卡任务尚需通关{remain}次")
         else:
             self._log("每日关卡任务已完成")
+
 @description('''
 这是兜底的设置，刷取1-1关卡，直到体力耗尽
 '''.strip())
