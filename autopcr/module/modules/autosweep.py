@@ -525,6 +525,9 @@ unique_equip_2_pure_memory_id = [
         107801, # 水黑
         115501, # 礼妈
         115601, # 礼衣
+        117201, # 水望
+        117301, # 水千
+        117401, # 水裁
 ]
 @inttype('very_hard_sweep_daily_limit', "单项刷取次数上限(0为不限制)", 0, _HARD_SWEEP_LIMIT_CANDIDATES)
 @conditional_execution1("very_hard_sweep_run_time", ["vh庆典"])
@@ -930,6 +933,15 @@ class daily_quest_mission(Module):
             self._warn(f"体力不足，每日关卡任务尚需通关{remain}次")
         else:
             self._log("每日关卡任务已完成")
+@description('''
+这是兜底的设置，刷取1-1关卡，直到体力耗尽
+'''.strip())
+@name("刷1-1")
+@default(True)
+@tag_stamina_consume
+class oldest_normal_quest_sweep(DIY_sweep):
+    async def get_loop_quest(self, client: pcrclient) -> List[Tuple[int, int]]:
+        return [(11001001, 1)]
 
 class TalentSweep(DIY_sweep):
     def get_recovery_areas(self) -> List[int]: ...
