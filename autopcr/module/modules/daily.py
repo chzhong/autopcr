@@ -267,7 +267,7 @@ class jjc_reward(Module):
         self._log(f"pjjc币x{info.reward_info.count}")
 
 _USER_INFO_DISPLAY_ORDER = (
-    '玛娜', '心碎', '星球杯', '星幽碎片', '属性球', '职能扭蛋券', '黎明界票', '大师碎片', '炼金点数',
+    '玛娜', '心碎', '星球杯', '星幽碎片', '属性球', '职能精通券', '黎明界票', '大师碎片', '炼金点数',
     '香水', '扫荡券', '加速券', '大师币', '连结币',
 )
 
@@ -276,8 +276,8 @@ _USER_INFO_DISPLAY_ORDER = (
 @default(True)
 @multichoice(
     "user_info_display", "显示信息",
-    ['心碎', '星幽碎片', '炼金点数', '香水'],
-    ['玛娜', '心碎', '星球杯', '星幽碎片', '属性球', '职能扭蛋券', '黎明界票', '大师碎片', '炼金点数', '香水', '扫荡券', '加速券', '大师币', '连结币']
+    ['心碎', '星幽碎片', '炼金点数', '香水', '职能精通券', '黎明界票'],
+    ['玛娜', '心碎', '星球杯', '星幽碎片', '属性球', '职能精通券', '黎明界票', '大师碎片', '炼金点数', '香水', '扫荡券', '加速券', '大师币', '连结币']
 )
 class user_info(Module):
     def _collect_optional_info(self, client: pcrclient, display_items: Set[str]) -> Dict[str, str]:
@@ -323,7 +323,7 @@ class user_info(Module):
             '星幽碎片': lambda: fmt(inv(db.xinyou)),
             '母猪石': lambda: fmt(inv((eInventoryType.Item, 90005))),
             '属性球': fmt_balls,
-            '职能扭蛋券': lambda: fmt(inv(db.unit_role_gach_ticket)),
+            '职能精通券': lambda: fmt(inv(db.unit_role_gach_ticket)),
             '黎明界票': lambda: fmt(inv(db.labyrinth_ticket)),
             '大师碎片': fmt_master_fragment,
             '炼金点数': lambda: fmt(
