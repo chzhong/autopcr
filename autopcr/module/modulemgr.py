@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from dataclasses_json import dataclass_json
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from abc import abstractmethod, abstractproperty
 
 from ..model.error import *
@@ -83,8 +83,14 @@ class ModuleManager:
 
     def __init__(self, config: dict):
         from .modulelistmgr import ModuleListManager
+        self._daily_warnings: List[Tuple[str, str]] = []
         self.modules_list: ModuleListManager = ModuleListManager(self)
         self.config = config
+
+    @property
+    def daily_warnings(self) -> Tuple[Tuple[str, str], ...]:
+        """本次任务此前模块的警告和中止提示，每项为（模块名，提示内容）。"""
+        return tuple(self._daily_warnings)
     
     async def __aenter__(self):
         self.client = await self.get_client()
@@ -165,15 +171,29 @@ class ModuleManager:
                         order = [],
                         result = {}
                 )
+                self._daily_warnings.clear()
 
                 for module in modules:
                     resp.order.append(module.key)
                     resp.result[module.key] = await module.do_from(client)
+                    if resp.result[module.key].status == eResultStatus.WARNING:
+                        self._daily_warnings.extend(
+                            (module.name, entry)
+                            for entry in module.log if entry.startswith('! ')
+                        )
+                    elif resp.result[module.key].status == eResultStatus.ABORT:
+                        if module.abort_message:
+                            self._daily_warnings.append((module.name, module.abort_message))
+                        self._daily_warnings.extend(
+                            (module.name, entry)
+                            for entry in module.log
+                        )
                     if resp.result[module.key].status == eResultStatus.PANIC:
                         break
 
                 return resp
             finally:
+                self._daily_warnings.clear()
                 if activated:
                     client.deactivate()
         finally:
