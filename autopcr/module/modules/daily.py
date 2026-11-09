@@ -274,6 +274,7 @@ _USER_INFO_DISPLAY_ORDER = (
 @description('展示基本信息，固定显示玩家名、体力、等级、钻石、母猪石、全角色战力，可自定义显示其他信息')
 @name('基本信息')
 @default(True)
+@booltype('user_info_show_warnings', '汇总本次警告', True)
 @multichoice(
     "user_info_display", "显示信息",
     ['心碎', '星幽碎片', '炼金点数', '香水', '职能精通券', '黎明界票'],
@@ -394,3 +395,9 @@ class user_info(Module):
         self._log(f"全角色战力：{format_number(total_power)}")
         self._log(f"已氪体数：{data.recover_stamina_exec_count}")
         self._log(f"清日常时间：{now}")
+        if self.get_config('user_info_show_warnings'):
+            warnings = getattr(self._parent, '_daily_warnings', [])
+            if warnings:
+                self._log('本次警告：')
+                for module_name, message in warnings:
+                    self._log(f"{module_name}：{message}")

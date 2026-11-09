@@ -211,6 +211,7 @@ class Module:
         try:
             self.log.clear()
             self.warn.clear()
+            self.is_warn = False
 
             if self.need_login:
                 if client.logged == eLoginStatus.NOT_LOGGED or not client.data.ready:

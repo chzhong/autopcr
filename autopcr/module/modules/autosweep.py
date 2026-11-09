@@ -770,6 +770,8 @@ class DIY_sweep(Module):
 
         result = []
         if nloop == [] and loop == []:
+            if self.is_warn:
+                return
             raise SkipError("无刷取关卡")
         clean_cnt = Counter()
         for quest_id, count in _sweep(): 
@@ -975,7 +977,7 @@ class TalentSweep(DIY_sweep):
                 self._warn(f"未通关{talent_name}关卡，无法扫荡")
                 continue
             elif max_quest != max_sweepable_quest and talent_id in no_max_no_sweep:
-                self._log(f"不扫荡非最高的{db.get_quest_name(max_sweepable_quest)}关卡")
+                self._warn(f"{talent_name}最高关卡未通关，不扫荡非最高的{db.get_quest_name(max_sweepable_quest)}关卡")
                 self._log(f"如欲扫荡，请移除{talent_name}的非最高不扫荡")
                 continue
             recover = talent_id in recovery_areas

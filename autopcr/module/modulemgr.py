@@ -165,15 +165,22 @@ class ModuleManager:
                         order = [],
                         result = {}
                 )
+                self._daily_warnings = []
 
                 for module in modules:
                     resp.order.append(module.key)
                     resp.result[module.key] = await module.do_from(client)
+                    if resp.result[module.key].status == eResultStatus.WARNING:
+                        self._daily_warnings.extend(
+                            (module.name, entry[2:])
+                            for entry in module.log if entry.startswith('! ')
+                        )
                     if resp.result[module.key].status == eResultStatus.PANIC:
                         break
 
                 return resp
             finally:
+                self._daily_warnings = []
                 if activated:
                     client.deactivate()
         finally:
