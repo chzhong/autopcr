@@ -147,9 +147,10 @@ class Module:
         self.need_login = True
         from .modulemgr import ModuleManager
         self._parent: ModuleManager = parent
-        self.log = []
-        self.warn = []
-        self.is_warn = False
+        self.log: List[str] = []
+        self.warn: List[str] = []
+        self.is_warn: bool = False
+        self.abort_message: str = ""
         self.table: ResultTable = ResultTable()
 
         from os.path import join
@@ -211,6 +212,8 @@ class Module:
         try:
             self.log.clear()
             self.warn.clear()
+            self.is_warn = False
+            self.abort_message = ""
 
             if self.need_login:
                 if client.logged == eLoginStatus.NOT_LOGGED or not client.data.ready:
@@ -235,6 +238,7 @@ class Module:
             result.log = str(e)
             result.status = eResultStatus.SKIP
         except AbortError as e:
+            self.abort_message = str(e)
             result.log = str(e)
             result.status = eResultStatus.ABORT
         except PanicError as e:

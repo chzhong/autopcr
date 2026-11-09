@@ -30,6 +30,7 @@ class hatsune_h_sweep(Module):
         not_sweep_hatsune_id: Set[int] = set(self.get_config('hatsune_h_sweep_not_event'))
         is_error = False
         is_abort = False
+        abort_reasons = []
         do_sweep = False
         event_active = False
         for event in db.get_active_event():
@@ -66,6 +67,7 @@ class hatsune_h_sweep(Module):
                 except AbortError as e:
                     is_abort = True
                     self._log(f"{quest_id}: {str(e)}")
+                    abort_reasons.append(f"{event_name} {db.get_quest_name(quest_id)}: {e}")
                     break
                 except Exception as e: 
                     is_error = True
@@ -73,7 +75,7 @@ class hatsune_h_sweep(Module):
                     break
         if not event_active: raise SkipError("当前无进行中的活动")
         if is_error: raise ValueError()
-        if is_abort: raise AbortError()
+        if is_abort: raise AbortError('；'.join(abort_reasons))
         if not do_sweep: raise SkipError()
 
 @name('扫荡活动vh本boss')
