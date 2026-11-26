@@ -77,7 +77,8 @@ class StaminaIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.client._keys = {}
         self.client.begin_daily_execution(True)
         self.client.data = SimpleNamespace(
-            team_level=1, stamina=588, clan_battle_point=900,
+            team_level=1, stamina=588, clan_battle_point=900, clan=1,
+            get_shop_gold=lambda system: 0,
             recover_stamina_exec_count=0,
             settings=SimpleNamespace(quest=SimpleNamespace(recovery_time=360)),
             quest_dict={q: SimpleNamespace(clear_flg=3) for q in QUESTS},
@@ -96,9 +97,7 @@ class StaminaIntegrationTest(unittest.IsolatedAsyncioTestCase):
         data = self.client.data
         cost = self.client.quest_stamina_cost(quest) * count
         data.stamina -= cost
-        data.clan_battle_point = min(900, data.clan_battle_point + cost)
         return SimpleNamespace(
-            clan_point=SimpleNamespace(after_point=data.clan_battle_point),
             quest_result_list=[], bonus_reward_list=[],
         )
 
@@ -350,6 +349,81 @@ class StaminaIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(client.daily_execution)
         self.assertIsNone(client.clan_stamina_policy)
         client.deactivate.assert_called_once()
+
+    async def test_one_top_request_shared_by_daily_modules(self):
+        client = self.client
+        client.clan_battle_top = pcrclient.clan_battle_top.__get__(client)
+        client.request = AsyncMock(return_value=SimpleNamespace(point=630, remaining_count=3))
+        client.data.stamina = 89
+        await client.configure_clan_stamina(True, True, '06:00')
+        await self.module(recover=2).do_task(client)
+        top = await client.clan_battle_top()
+        self.assertEqual(top.point, 900)
+        self.assertEqual(top.remaining_count, 3)
+        self.assertEqual(client.request.await_count, 1)
+        # 返回副本，不修改缓存中的首次服务器响应。
+        self.assertEqual(client._clan_battle_top_cache.point, 630)
+
+    async def test_top_cache_expires_between_runs_and_game_days(self):
+        client = self.client
+        client.clan_battle_top = pcrclient.clan_battle_top.__get__(client)
+        client.request = AsyncMock(return_value=SimpleNamespace(point=900))
+        await client.clan_battle_top()
+        await client.clan_battle_top()
+        self.assertEqual(client.request.await_count, 1)
+        client.end_daily_execution()
+        client.begin_daily_execution(True)
+        await client.clan_battle_top()
+        self.assertEqual(client.request.await_count, 2)
+        with patch.object(db, 'get_today_start_time', return_value=datetime(2026, 11, 27, 5)):
+            await client.clan_battle_top()
+        self.assertEqual(client.request.await_count, 3)
+        client.end_daily_execution()
+        await client.clan_battle_top()
+        await client.clan_battle_top()
+        self.assertEqual(client.request.await_count, 5)
+
+    async def test_estimate_uses_discounted_cost_and_caps_at_900(self):
+        client = self.client
+        client.data.clan_battle_point = 850
+        client.data.get_quest_stamina_half_campaign_times = lambda q: 50
+        await client.quest_skip_aware(QUESTS[0], 3)
+        self.assertEqual(client.data.clan_battle_point, 877)
+        await client.quest_skip_aware(QUESTS[0], 3)
+        self.assertEqual(client.data.clan_battle_point, 900)
+        await client.quest_skip_aware(QUESTS[0], 3)
+        self.assertEqual(client.data.clan_battle_point, 900)
+        client.clan_battle_top.assert_not_awaited()
+
+    async def test_estimate_does_not_credit_purchase_or_failed_sweep(self):
+        client = self.client
+        client.data.clan_battle_point = 630
+        client.data.stamina = 0
+        _, count, stopped = await client.quest_skip_aware(QUESTS[0], 1)
+        self.assertEqual((count, stopped), (0, True))
+        self.assertEqual(client.data.clan_battle_point, 630)
+        await client.recover_stamina()
+        self.assertEqual(client.data.clan_battle_point, 630)
+        await client.quest_skip_aware(QUESTS[0], 1)
+        self.assertEqual(client.data.clan_battle_point, 648)
+        client.clan_battle_top.assert_not_awaited()
+
+    async def test_server_cp_is_not_counted_twice(self):
+        client = self.client
+        client.data.clan_battle_point = 630
+        original_skip = self.skip
+
+        async def server_skip(quest, count):
+            response = await original_skip(quest, count)
+            # 模拟datamgr根据服务器clan_point更新库存。
+            client.data.clan_battle_point = 648
+            response.clan_point = SimpleNamespace(after_point=648)
+            return response
+
+        client.quest_skip.side_effect = server_skip
+        await client.quest_skip_aware(QUESTS[0], 1)
+        self.assertEqual(client.data.clan_battle_point, 648)
+        client.clan_battle_top.assert_not_awaited()
 
 
 if __name__ == '__main__':

@@ -11,6 +11,7 @@ from typing import Callable, Tuple, Union, Optional
 import typing, math
 from collections import Counter
 from contextlib import contextmanager
+from copy import copy
 
 class eLoginStatus(Enum):
     NOT_LOGGED = 0
@@ -24,6 +25,8 @@ class pcrclient(apiclient):
         self.daily_execution = False
         self.stamina_stop_reason = ""
         self._clan_stamina_policy: Optional[ClanBattleStaminaPolicy] = None
+        self._clan_battle_top_cache = None
+        self._clan_battle_top_day = None
         super().__init__(sdk)
         self.data = datamgr()
         self.session = sessionmgr(sdk)
@@ -94,12 +97,22 @@ class pcrclient(apiclient):
     async def clan_battle_top(self):
         if not self.data.clan:
             raise AbortError("未加入公会")
+        day = db.get_today_start_time()
+        if (self.daily_execution and self._clan_battle_top_cache is not None
+                and self._clan_battle_top_day == day):
+            # 刀数等信息共用本次查询，CP则返回扫荡后累计的当前值。
+            resp = copy(self._clan_battle_top_cache)
+            resp.point = self.data.clan_battle_point
+            return resp
         req = ClanBattleTopRequest()
         req.clan_id = self.data.clan
         req.is_first = 1
         req.current_clan_battle_coin = self.data.get_shop_gold(eSystemId.CLAN_BATTLE_SHOP)
         resp = await self.request(req)
         self.data.clan_battle_point = resp.point
+        if self.daily_execution:
+            self._clan_battle_top_cache = resp
+            self._clan_battle_top_day = day
         return resp
 
     async def alces_top(self):
@@ -1804,13 +1817,17 @@ class pcrclient(apiclient):
                             self.stamina_stop_reason = "已达到会战温存体力"
                             return True, rewards
                     elif self.data.clan_battle_point is not None and self.data.clan_battle_point < 900:
-                        # 服务器每批返回新CP；达900后下一批立即切换温存/禅模式。
-                        batch = min(batch, 1)
+                        # 只刷到900 CP边界，下一批立即切换温存/禅模式。
+                        cost = self.quest_stamina_cost(quest)
+                        if cost:
+                            batch = min(batch, math.ceil((900 - self.data.clan_battle_point) / cost))
                 while self.data.stamina < self.quest_stamina_cost(quest) * batch:
                     if self.clan_stamina_mode != 'reserve' and self.stamina_recover_cnt > self.data.recover_stamina_exec_count:
                         await self.recover_stamina()
                     else:
                         return True, rewards
+                before_cp = self.data.clan_battle_point
+                spent_stamina = self.quest_stamina_cost(quest) * batch
                 if db.is_shiori_quest(quest):
                     event = db.quest_to_event[quest].event_id
                     resp = await self.shiori_quest_skip(event, quest, batch)
@@ -1824,10 +1841,11 @@ class pcrclient(apiclient):
                 else:
                     resp = await self.quest_skip(quest, batch)
 
-                if self.clan_stamina_policy is not None:
-                    point = getattr(resp, 'clan_point', None)
-                    if point is None or point.after_point is None:
-                        await self.clan_battle_top()
+                point = getattr(resp, 'clan_point', None)
+                if (point is None or point.after_point is None) and before_cp is not None and before_cp < 900:
+                    # 按成功扫荡的实际体力成本估算，避免缺少CP字段时再次查询。
+                    # 不用库存差值：升级、奖励可能同时返还体力。
+                    self.data.clan_battle_point = min(900, before_cp + spent_stamina)
 
                 clear_count += batch
                 if self.quest_skip_remaining is not None:
@@ -2051,11 +2069,15 @@ class pcrclient(apiclient):
         self.daily_execution = active
         self.stamina_stop_reason = ""
         self._clan_stamina_policy = None
+        self._clan_battle_top_cache = None
+        self._clan_battle_top_day = None
 
     def end_daily_execution(self):
         self.daily_execution = False
         self.stamina_stop_reason = ""
         self._clan_stamina_policy = None
+        self._clan_battle_top_cache = None
+        self._clan_battle_top_day = None
 
     async def configure_clan_stamina(self, allow_cp: bool, reserve: bool, attack_time: str):
         if not self.daily_execution or not (allow_cp or reserve) or not db.is_clan_battle_time():

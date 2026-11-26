@@ -933,8 +933,6 @@ class clan_battle_stamina_adjust(Module):
                 if not clears:
                     self._warn(client.stamina_stop_reason or '扫荡无进展，停止调整')
                     break
-                if client.data.clan_battle_point == before_cp:
-                    await client.clan_battle_top()
                 if filling and client.data.clan_battle_point <= before_cp:
                     self._warn('扫荡后CP未增加，停止补CP')
                     break
