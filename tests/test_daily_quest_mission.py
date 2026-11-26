@@ -20,6 +20,7 @@ class FakeParent:
 
 
 class FakeClient:
+    stamina_stop_reason = ""
     def __init__(self, mission=None, zen=False, stop_after=None):
         self.mission = mission
         self.zen = zen
@@ -55,7 +56,7 @@ def make_mission(clear_num=0, status=eMissionStatusType.NoClear):
 
 class DailyQuestMissionTest(unittest.IsolatedAsyncioTestCase):
     def make_module(self):
-        module = daily_quest_mission(FakeParent())
+        module = daily_quest_mission(FakeParent({'daily_quest_mission_dusk_only': False}))
         module._get_mission_ids = lambda: {123}
         return module
 
@@ -133,12 +134,12 @@ class DailyQuestMissionTest(unittest.IsolatedAsyncioTestCase):
     def test_module_metadata_and_order(self):
         module = daily_quest_mission(FakeParent())
         self.assertTrue(module.default)
-        self.assertEqual(module.config, {})
+        self.assertTrue(module.get_config('daily_quest_mission_dusk_only'))
         self.assertTrue(module.stamina_relative)
         self.assertIn("体力消耗", module.tags)
 
         order = [module.__name__ for module in daily_modules.modules]
-        self.assertEqual(order.index("daily_quest_mission"), order.index("all_in_hatsune") + 1)
+        self.assertEqual(order.index("daily_quest_mission"), order.index("clan_battle_stamina_adjust") + 1)
 
 
 if __name__ == "__main__":

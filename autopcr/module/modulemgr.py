@@ -124,7 +124,7 @@ class ModuleManager:
         return self.modules_list.generate_tab(clan, batch)
     
     async def do_daily(self, isAdminCall: bool = False) -> "TaskResultInfo":
-        resp = await self.do_task(self.config, self.modules_list.daily_modules, isAdminCall)
+        resp = await self.do_task(self.config, self.modules_list.daily_modules, isAdminCall, is_daily=True)
         status = eResultStatus.SUCCESS
         if any(m.status == eResultStatus.WARNING or m.status == eResultStatus.ABORT for m in resp.result.values()):
             status = eResultStatus.WARNING
@@ -143,7 +143,7 @@ class ModuleManager:
         res = await self.save_single_result(key, resp)
         return res
 
-    async def do_task(self, config: dict, modules: List[Module], isAdminCall: bool = False) -> TaskResult:
+    async def do_task(self, config: dict, modules: List[Module], isAdminCall: bool = False, *, is_daily: bool = False) -> TaskResult:
         await db.enter_cache_scope()
         try:
             if db.is_clan_battle_time() and self.is_clan_battle_forbidden() and not isAdminCall:
@@ -162,6 +162,7 @@ class ModuleManager:
             activated = False
             await client.activate()
             activated = True
+            client.begin_daily_execution(is_daily)
             try:
                 self.config["stamina_relative_not_run"] = any(db.is_campaign(campaign) for campaign in self.config.get("stamina_relative_not_run_campaign_before_one_day", []))
 
@@ -193,6 +194,7 @@ class ModuleManager:
 
                 return resp
             finally:
+                client.end_daily_execution()
                 self._daily_warnings.clear()
                 if activated:
                     client.deactivate()

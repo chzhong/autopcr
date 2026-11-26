@@ -4,6 +4,8 @@ from .sdkclient import sdkclient
 from .sessionmgr import sessionmgr
 from .misc import errorhandler, mutexhandler
 from .datamgr import datamgr
+from .clan_battle_stamina import ClanBattleStaminaPolicy
+from datetime import timedelta
 from ..db.database import db
 from typing import Callable, Tuple, Union, Optional
 import typing, math
@@ -19,6 +21,9 @@ class pcrclient(apiclient):
     def __init__(self, sdk: sdkclient):
         self._base_keys = {}
         self._keys = {}
+        self.daily_execution = False
+        self.stamina_stop_reason = ""
+        self._clan_stamina_policy: Optional[ClanBattleStaminaPolicy] = None
         super().__init__(sdk)
         self.data = datamgr()
         self.session = sessionmgr(sdk)
@@ -93,7 +98,9 @@ class pcrclient(apiclient):
         req.clan_id = self.data.clan
         req.is_first = 1
         req.current_clan_battle_coin = self.data.get_shop_gold(eSystemId.CLAN_BATTLE_SHOP)
-        return await self.request(req)
+        resp = await self.request(req)
+        self.data.clan_battle_point = resp.point
+        return resp
 
     async def alces_top(self):
         if not self.data.is_quest_cleared(11018002):
@@ -1776,44 +1783,68 @@ class pcrclient(apiclient):
         if self.quest_skip_remaining is not None:
             times = min(times, self.quest_skip_remaining)
 
-        stamina_coefficient = self.data.get_quest_stamina_half_campaign_times(quest)
-        if not stamina_coefficient: stamina_coefficient = 100
         result: List[InventoryInfo] = []
         clear_count = 0
+        self.stamina_stop_reason = ""
         async def skip(times) -> Tuple[bool, List[InventoryInfo]]:
-            while self.data.stamina < int(math.floor((info.stamina * (stamina_coefficient / 100)))) * times:
-                if self.stamina_recover_cnt > self.data.recover_stamina_exec_count:
-                    await self.recover_stamina()
-                else:
-                    return True, []
-            if db.is_shiori_quest(quest):
-                event = db.quest_to_event[quest].event_id
-                resp = await self.shiori_quest_skip(event, quest, times)
-            elif db.is_event_quest(quest):
-                event = db.quest_to_event[quest].event_id
-                resp = await self.event_quest_skip(event, quest, times)
-            elif db.is_talent_quest(quest):
-                resp = await self.talent_quest_skip(quest, times)
-            elif db.is_abyss_quest(quest):
-                resp = await self.abyss_quest_skip(quest, times)
-            else:
-                resp = await self.quest_skip(quest, times)
-
             nonlocal clear_count
-            clear_count += times
-            if self.quest_skip_remaining is not None:
-                self.set_quest_skip_remaining(self.quest_skip_remaining - times)
-            result = []
-            if resp.quest_result_list:
-                for result_list in resp.quest_result_list:
-                    if hasattr(result_list, 'quest_result'):
-                        for quest_result in result_list.quest_result:
-                            result = result + quest_result.reward_list
+            rewards = []
+            while times > 0:
+                batch = times
+                if self.clan_stamina_policy is not None:
+                    if self.is_stamina_consume_not_run():
+                        self.stamina_stop_reason = "体力消耗，不执行"
+                        return True, rewards
+                    if self.clan_stamina_mode == 'reserve':
+                        available = max(0, self.data.stamina - self.clan_stamina_floor)
+                        cost = self.quest_stamina_cost(quest)
+                        if cost:
+                            batch = min(batch, available // cost)
+                        if batch <= 0:
+                            self.stamina_stop_reason = "已达到会战温存体力"
+                            return True, rewards
+                    elif self.data.clan_battle_point is not None and self.data.clan_battle_point < 900:
+                        # 服务器每批返回新CP；达900后下一批立即切换温存/禅模式。
+                        batch = min(batch, 1)
+                while self.data.stamina < self.quest_stamina_cost(quest) * batch:
+                    if self.clan_stamina_mode != 'reserve' and self.stamina_recover_cnt > self.data.recover_stamina_exec_count:
+                        await self.recover_stamina()
                     else:
-                        result = result + result_list.reward_list
-            if resp.bonus_reward_list:
-                result = result + resp.bonus_reward_list
-            return False, result
+                        return True, rewards
+                if db.is_shiori_quest(quest):
+                    event = db.quest_to_event[quest].event_id
+                    resp = await self.shiori_quest_skip(event, quest, batch)
+                elif db.is_event_quest(quest):
+                    event = db.quest_to_event[quest].event_id
+                    resp = await self.event_quest_skip(event, quest, batch)
+                elif db.is_talent_quest(quest):
+                    resp = await self.talent_quest_skip(quest, batch)
+                elif db.is_abyss_quest(quest):
+                    resp = await self.abyss_quest_skip(quest, batch)
+                else:
+                    resp = await self.quest_skip(quest, batch)
+
+                if self.clan_stamina_policy is not None:
+                    point = getattr(resp, 'clan_point', None)
+                    if point is None or point.after_point is None:
+                        await self.clan_battle_top()
+
+                clear_count += batch
+                if self.quest_skip_remaining is not None:
+                    self.set_quest_skip_remaining(self.quest_skip_remaining - batch)
+                result = []
+                if resp.quest_result_list:
+                    for result_list in resp.quest_result_list:
+                        if hasattr(result_list, 'quest_result'):
+                            for quest_result in result_list.quest_result:
+                                result = result + quest_result.reward_list
+                        else:
+                            result = result + result_list.reward_list
+                if resp.bonus_reward_list:
+                    result = result + resp.bonus_reward_list
+                rewards.extend(result)
+                times -= batch
+            return False, rewards
 
         no_stamina = False
         if info.daily_limit:
@@ -1831,10 +1862,9 @@ class pcrclient(apiclient):
                     remain = info.daily_limit
                 t = min(times, remain)
                 no_stamina, resp = await skip(t)
+                result = result + resp
                 if no_stamina:
                     break
-
-                result = result + resp
 
                 times -= t
                 remain -= t
@@ -2008,10 +2038,61 @@ class pcrclient(apiclient):
         return self._get_key('stamina_recover_times', 0)
 
     def is_stamina_consume_not_run(self):
+        if self.clan_stamina_mode is not None:
+            return False
         return self._get_key('stamina_consume_not_run', False)
 
     def is_stamina_get_not_run(self):
+        if self.clan_stamina_mode is not None:
+            return False
         return self._get_key('stamina_get_not_run', False)
+
+    def begin_daily_execution(self, active: bool):
+        self.daily_execution = active
+        self.stamina_stop_reason = ""
+        self._clan_stamina_policy = None
+
+    def end_daily_execution(self):
+        self.daily_execution = False
+        self.stamina_stop_reason = ""
+        self._clan_stamina_policy = None
+
+    async def configure_clan_stamina(self, allow_cp: bool, reserve: bool, attack_time: str):
+        if not self.daily_execution or not (allow_cp or reserve) or not db.is_clan_battle_time():
+            return
+        await self.clan_battle_top()
+        day = db.get_today_start_time()
+        self._clan_stamina_policy = ClanBattleStaminaPolicy(
+            allow_cp, reserve, attack_time,
+            db.is_clan_battle_time(day + timedelta(days=1)), day,
+        )
+
+    @property
+    def clan_stamina_policy(self) -> Optional[ClanBattleStaminaPolicy]:
+        policy = self._clan_stamina_policy
+        if (policy is not None and self.daily_execution
+                and db.get_today_start_time() == policy.game_day and db.is_clan_battle_time()):
+            return policy
+        return None
+
+    @property
+    def clan_stamina_mode(self) -> Optional[str]:
+        policy = self.clan_stamina_policy
+        return policy.mode(self.data.clan_battle_point) if policy else None
+
+    @property
+    def clan_stamina_floor(self) -> int:
+        policy = self.clan_stamina_policy
+        if policy and self.clan_stamina_mode == 'reserve':
+            return policy.reserve_floor(
+                apiclient.datetime, db.team_info[self.data.team_level].max_stamina,
+                self.data.settings.quest.recovery_time,
+            )
+        return 0
+
+    def quest_stamina_cost(self, quest: int) -> int:
+        coefficient = self.data.get_quest_stamina_half_campaign_times(quest) or 100
+        return math.floor(db.quest_info[quest].stamina * coefficient / 100)
 
     def is_cron_run(self):
         return self._get_key('cron_run', False)

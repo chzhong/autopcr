@@ -214,6 +214,7 @@ class Module:
             self.warn.clear()
             self.is_warn = False
             self.abort_message = ""
+            client.stamina_stop_reason = ""
 
             if self.need_login:
                 if client.logged == eLoginStatus.NOT_LOGGED or not client.data.ready:
@@ -249,6 +250,8 @@ class Module:
             result.log = str(e)
             result.status = eResultStatus.ERROR
         finally:
+            if client.stamina_stop_reason and not any(client.stamina_stop_reason in line for line in self.log):
+                self._log(client.stamina_stop_reason)
             result.log = ('\n'.join(self.log) + "\n" + result.log).strip() or "ok"
             result.table = self.table
 

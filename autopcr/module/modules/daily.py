@@ -14,6 +14,9 @@ from ...util.format_number import format_number
 @description('仅开启时生效，氪体数将取满足条件的最大值，禅模式指不执行体力相关的功能，仅在清日常生效，单项执行将忽略。庆典包括其倍数，加速期间的所有倍数判断均x2')
 @name("全局配置")
 @default(True)
+@booltype('clan_battle_allow_cp', '会战体力自适应：允许刷CP', False)
+@booltype('clan_battle_reserve_stamina', '会战体力自适应：为次日温存体力', False)
+@timetype('clan_battle_attack_time', '预计出刀时间', '05:00')
 @inttype('sweep_recover_stamina_times', "平时氪体数", 0, [i for i in range(41)])
 @inttype('sweep_recover_stamina_times_n2', "n2氪体数", 0, [i for i in range(41)])
 @inttype('sweep_recover_stamina_times_n3', "n3氪体数", 0, [i for i in range(41)])
@@ -61,6 +64,19 @@ class global_config(Module):
                 client.set_stamina_get_not_run()
                 client.set_stamina_consume_not_run()
                 self._log(msg + "禅模式")
+
+        await client.configure_clan_stamina(
+            self.get_config('clan_battle_allow_cp'),
+            self.get_config('clan_battle_reserve_stamina'),
+            self.get_config('clan_battle_attack_time'),
+        )
+        mode = client.clan_stamina_mode
+        if mode == 'cp':
+            self._log(f"会战体力自适应：当前CP {client.data.clan_battle_point}，允许获取和消耗体力补CP")
+        elif mode == 'reserve':
+            self._log(f"会战体力自适应：允许获取体力，温存值{client.clan_stamina_floor}")
+        elif mode == 'unlimited':
+            self._log('下个游戏日无公会战，允许获取和消耗体力，不温存')
 
 
 @description('选谁其实排名都一样的')

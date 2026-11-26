@@ -20,6 +20,7 @@ class datamgr(BaseModel, Component[apiclient]):
     ready: bool = False
     settings: IniSetting = None
     stamina_full_recovery_time: int = 0
+    clan_battle_point: Optional[int] = None
     dungeon_avaliable: bool = False
     resident_info: MonthlyGachaInfo = None
     finishedQuest: Set[int] = set()
@@ -993,6 +994,9 @@ class datamgr(BaseModel, Component[apiclient]):
             if resp.update_bank_gold is not None:
                 self.user_gold_bank_info.bank_gold = resp.update_bank_gold
             await resp.update(self, request)
+            clan_point = getattr(resp, 'clan_point', None)
+            if clan_point is not None and clan_point.after_point is not None:
+                self.clan_battle_point = clan_point.after_point
         self.data_time = apiclient.time
         return resp
 

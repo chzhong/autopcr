@@ -82,7 +82,7 @@ class lazy_normal_sweep(Module):
                             clean_cnt[target_id] += clear_count
                         if no_stamina:
                             stop = True
-                            if not clean_cnt: self._log(f"刷取{db.get_quest_name(target_id)}体力不足")
+                            if not clean_cnt: self._log(f"刷取{db.get_quest_name(target_id)}{client.stamina_stop_reason or '体力不足'}")
                             break
                     except SkipError:
                         pass
@@ -251,7 +251,7 @@ class simple_demand_sweep_base(Module):
                         tmp.extend(resp) 
                         if no_stamina:
                             stop = True
-                            if not clean_cnt: self._log(f"刷取{db.get_quest_name(quest.quest_id)}体力不足")
+                            if not clean_cnt: self._log(f"刷取{db.get_quest_name(quest.quest_id)}{client.stamina_stop_reason or '体力不足'}")
                             break
                     except SkipError as e:
                         pass
@@ -345,7 +345,7 @@ class limited_demand_sweep_base(simple_demand_sweep_base):
                         if no_stamina:
                             stop = True
                             if not clean_cnt:
-                                self._log(f"刷取{db.get_quest_name(quest.quest_id)}体力不足")
+                                self._log(f"刷取{db.get_quest_name(quest.quest_id)}{client.stamina_stop_reason or '体力不足'}")
                             break
                     except SkipError:
                         pass
@@ -781,7 +781,7 @@ class DIY_sweep(Module):
                 if clear_count:
                     clean_cnt[quest_id] += clear_count
                 if no_stamina:
-                    if not clean_cnt: self._log(f"刷取{db.get_quest_name(quest_id)}体力不足")
+                    if not clean_cnt: self._log(f"刷取{db.get_quest_name(quest_id)}{client.stamina_stop_reason or '体力不足'}")
                     break
             except SkipError as e:
                 pass
@@ -854,6 +854,99 @@ class last_normal_quest_sweep(DIY_sweep):
         last_sweep_quests_count: int = 3
         quest: List[Tuple[int, int]] = [(id, last_sweep_quests_count) for id in last_sweep_quests]
         return quest
+
+@description('补刷最新主线N图，确保出刀所需的900 CP，或消耗超过温存值的体力。氪体数量为本模块本次额外购买上限。')
+@name('会战期间体力调整')
+@inttype('clan_battle_adjust_recover', '氪体数量', 0, list(range(41)))
+@booltype('clan_battle_adjust_prevent_overflow', '防温存爆体', False)
+@default(False)
+@tag_stamina_consume(do_check=False)
+class clan_battle_stamina_adjust(Module):
+    async def do_task(self, client: pcrclient):
+        if not db.is_clan_battle_time():
+            raise SkipError('当前没有公会战')
+        await client.clan_battle_top()
+        point = client.data.clan_battle_point
+        if point is None:
+            raise AbortError('未获取到公会战CP')
+        adjust = self.get_config('clan_battle_adjust_prevent_overflow')
+        if point >= 900 and not (adjust and client.clan_stamina_mode == 'reserve'):
+            raise SkipError('CP值已经足够')
+        if client.is_stamina_consume_not_run():
+            raise SkipError('体力消耗，不执行')
+
+        self._log(f'当前CP：{point}')
+        policy = client.clan_stamina_policy
+        if policy and policy.reserve and policy.next_battle:
+            floor = policy.reserve_floor(
+                apiclient.datetime, db.team_info[client.data.team_level].max_stamina,
+                client.data.settings.quest.recovery_time,
+            )
+            self._log(f'预计出刀时间：{db.format_time(policy.target_time)}，温存值：{floor}')
+
+        quests = db.last_normal_quest()[:3]
+        available = []
+        for quest in quests:
+            if client.data.is_quest_sweepable(quest):
+                available.append(quest)
+            else:
+                self._warn(f'{db.get_quest_name(quest)}未通关或未三星，无法扫荡')
+        if not available:
+            raise AbortError('最新三个主线关卡均无法扫荡')
+
+        quota = self.get_config('clan_battle_adjust_recover')
+        purchase_limit = db.team_info[client.data.team_level].recover_stamina_count
+        purchased = 0
+        counts = Counter()
+        rewards = []
+        index = 0
+        try:
+            while True:
+                before_cp = client.data.clan_battle_point
+                filling = before_cp < 900
+                if not filling and not (adjust and client.clan_stamina_mode == 'reserve'):
+                    break
+                if client.is_stamina_consume_not_run():
+                    break
+                quest = available[index % len(available)]
+                cost = client.quest_stamina_cost(quest)
+                if cost <= 0:
+                    raise AbortError('主线关卡体力消耗无效，停止调整')
+                if not filling and client.data.stamina - client.clan_stamina_floor < cost:
+                    self._log('已达到会战温存体力')
+                    break
+                # 禁用全局自动氪体；仅在补CP且不足一关体力时按本模块额度购买。
+                if client.data.stamina < cost:
+                    if filling and purchased < quota and client.data.recover_stamina_exec_count < purchase_limit:
+                        before = client.data.stamina
+                        await client.recover_stamina()
+                        purchased += 1
+                        if client.data.stamina <= before:
+                            raise AbortError('购买体力后库存未增加，停止补CP')
+                        continue
+                    self._warn(f'体力不足，CP 未到900（当前CP {before_cp}，本次购买{purchased}次）')
+                    break
+                with client.override_config({'stamina_recover_times': client.data.recover_stamina_exec_count}):
+                    result, clears, _ = await client.quest_skip_aware(quest, 1)
+                rewards.extend(result)
+                counts[quest] += clears
+                if not clears:
+                    self._warn(client.stamina_stop_reason or '扫荡无进展，停止调整')
+                    break
+                if client.data.clan_battle_point == before_cp:
+                    await client.clan_battle_top()
+                if filling and client.data.clan_battle_point <= before_cp:
+                    self._warn('扫荡后CP未增加，停止补CP')
+                    break
+                index += 1
+        finally:
+            for quest, count in counts.items():
+                if count:
+                    self._log(f'{db.get_quest_name(quest)}：扫荡{count}次')
+            if rewards:
+                self._log(await client.serialize_reward_summary(rewards))
+            self._log(f'当前CP：{client.data.clan_battle_point}，本次购买体力{purchased}次，剩余体力{client.data.stamina}')
+
 
 @description('确保每日任务“通关主线或活动关卡20次吧”完成。未完成时循环刷取最新的3个主线关卡')
 @name("完成每日关卡任务")
@@ -945,7 +1038,7 @@ class daily_quest_mission(Module):
                 self._log(await client.serialize_reward_summary(result))
 
         if remain > 0:
-            self._warn(f"体力不足，每日关卡任务尚需通关{remain}次")
+            self._warn(f"{client.stamina_stop_reason or '体力不足'}，每日关卡任务尚需通关{remain}次")
         else:
             self._log("每日关卡任务已完成")
 

@@ -274,7 +274,7 @@ class investigate_sweep(Module):
 
         if not clear_count:
             if no_stamina:
-                raise SkipError(f"{self.material_name()}关卡体力不足")
+                raise SkipError(client.stamina_stop_reason or f"{self.material_name()}关卡体力不足")
             raise SkipError(f"没有可扫荡的{self.material_name()}关卡次数")
 
         msg = await client.serialize_reward_summary(rewards)
