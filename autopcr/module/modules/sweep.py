@@ -30,7 +30,7 @@ class explore_sweep(Module):
                 raise AbortError(f"最高级探索{max_quest}未通关，不扫荡\n如欲扫荡已通关的，请关闭【非最高不扫荡】")
             name = db.get_quest_name(quest_id)
             state = self.clan_battle_stamina
-            if state is None or state.point is None:
+            if state is None or (state.point is None and state.policy is None):
                 await client.training_quest_skip(quest_id, remain_cnt)
                 self._log(f"{name}扫荡{remain_cnt}次")
                 return

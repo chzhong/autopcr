@@ -11,12 +11,15 @@ from ...model.enums import *
 from ...util.questutils import *
 from ...util.format_number import format_number
 
-@description('仅开启时生效，氪体数将取满足条件的最大值，禅模式指不执行体力相关的功能，仅在清日常生效，单项执行将忽略。庆典包括其倍数，加速期间的所有倍数判断均x2')
+@description('仅在清日常且本模块开启时配置策略，本模块不领取或消耗体力。氪体数取满足条件的最大值；庆典包括其倍数，加速期间倍数判断x2。'
+             '禅模式默认禁止体力获取和消耗。会战期间开启允许刷CP且CP不足900时解除限制；刷满后立即重新判断，关闭刷CP不会因温存开启而补CP。'
+             '温存在会战前一日12:00起生效；会战期间需CP满900才生效，允许领取体力，常规刷取最多消耗到温存值。'
+             '温存值按当前时刻到下一游戏日预计出刀时间的自回体动态计算；途中刷满CP也立即应用，剩余体力低于温存值就停止刷取。'
+             '最终日CP满且温存开启时，解除禅模式并正常领取、消耗，不再温存。'
+             '后续体力调整模块兜底补CP，并按防爆设置处理到预计出刀时间前的自回体溢出；不含未来领取的体力。'
+             '预计出刀时间默认05:00，请按实际出刀时间设置，否则可能温存不合预期。')
 @name("全局配置")
 @default(True)
-@booltype('clan_battle_allow_cp', '会战体力自适应：允许刷CP', False)
-@booltype('clan_battle_reserve_stamina', '会战体力自适应：为次日温存体力', False)
-@timetype('clan_battle_attack_time', '预计出刀时间', '05:00')
 @inttype('sweep_recover_stamina_times', "平时氪体数", 0, [i for i in range(41)])
 @inttype('sweep_recover_stamina_times_n2', "n2氪体数", 0, [i for i in range(41)])
 @inttype('sweep_recover_stamina_times_n3', "n3氪体数", 0, [i for i in range(41)])
@@ -26,6 +29,8 @@ from ...util.format_number import format_number
 @inttype('sweep_recover_stamina_times_vh2', "vh2氪体数", 0, [i for i in range(41)])
 @inttype('sweep_recover_stamina_times_vh3', "vh3以上氪体数", 0, [i for i in range(41)])
 @conditional_execution2('stamina_relative_not_run_campaign_before_one_day', [], desc='禅模式', check=False)
+@timetype('clan_battle_attack_time', '会战体力自适应：预计出刀时间', '05:00')
+@ClanBattleStaminaConfig()
 class global_config(Module):
     async def do_task(self, client: pcrclient): # stamina TODO
         if client.is_cron_run():
@@ -69,8 +74,8 @@ class global_config(Module):
         if state is None:
             return
         await state.configure(
-            self.get_config('clan_battle_allow_cp'),
-            self.get_config('clan_battle_reserve_stamina'),
+            '允许刷CP' in self.get_config('clan_battle_stamina_options'),
+            '为次日温存体力' in self.get_config('clan_battle_stamina_options'),
             self.get_config('clan_battle_attack_time'),
         )
         mode = state.mode
@@ -78,8 +83,8 @@ class global_config(Module):
             self._log(f"会战体力自适应：当前CP {state.point}，允许获取和消耗体力补CP")
         elif mode == 'reserve':
             self._log(f"会战体力自适应：允许获取体力，温存值{state.reserve_floor}")
-        elif mode == 'unlimited':
-            self._log('下个游戏日无公会战，允许获取和消耗体力，不温存')
+        elif mode == 'release':
+            self._log('会战最终日CP已满：允许获取和消耗体力，不再温存')
 
 
 @description('选谁其实排名都一样的')

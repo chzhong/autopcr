@@ -200,6 +200,21 @@ class MultiChoiceConfig(Config):
         else:
             return []
 
+class ClanBattleStaminaConfig(MultiChoiceConfig):
+    """沿用多选配置格式；兼容最初版本保存的两个布尔配置。"""
+    def __init__(self):
+        super().__init__('clan_battle_stamina_options', '会战体力自适应', [],
+                         ['允许刷CP', '为次日温存体力'])
+
+    def get_value(self):
+        if self.get_raw_value() is not None:
+            return super().get_value()
+        return [label for key, label in (
+            ('clan_battle_allow_cp', '允许刷CP'),
+            ('clan_battle_reserve_stamina', '为次日温存体力'),
+        ) if self._parent._get_raw_config(key, False)]
+
+
 class LabyrinthBossConfig(MultiChoiceConfig):
     def __init__(self, key: str, desc: str, area: int, default: List[int] = []):
         self.area = area

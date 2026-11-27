@@ -210,7 +210,7 @@ class Module:
 
     @property
     def clan_battle_stamina(self) -> Optional['ClanBattleStamina']:
-        return self._parent.clan_battle_stamina
+        return getattr(self._parent, 'clan_battle_stamina', None)
 
     @property
     def stamina_stop_reason(self) -> str:
@@ -229,7 +229,7 @@ class Module:
         self, client: pcrclient, quest: int, times: int, recover: bool = False, is_total: bool = False,
     ) -> Tuple[List[InventoryInfo], int, bool]:
         state = self.clan_battle_stamina
-        if state is None:
+        if state is None or (state.point is None and state.policy is None):
             return await client.quest_skip_aware(quest, times, recover, is_total)
         state.stop_reason = ''
         return await client.quest_skip_aware(quest, times, recover, is_total, budget=state)

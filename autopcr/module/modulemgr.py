@@ -8,7 +8,7 @@ from ..model.error import *
 from ..model.enums import *
 from ..db.database import db
 from .modulebase import Module, ModuleResult, eResultStatus
-from .clan_battle_stamina import ClanBattleStamina
+from .clan_battle_stamina import ClanBattleStamina, is_reserve_eve
 from ..core.clientpool import PoolClientWrapper
 import traceback
 import os
@@ -166,7 +166,12 @@ class ModuleManager:
             await client.activate()
             activated = True
             try:
-                self.clan_battle_stamina = ClanBattleStamina(client, is_daily=is_daily) if in_clan_battle else None
+                task_config = {**self.config, **config}
+                options = task_config.get('clan_battle_stamina_options')
+                reserve = ('为次日温存体力' in options if isinstance(options, list)
+                           else task_config.get('clan_battle_reserve_stamina', False))
+                use_policy = in_clan_battle or (is_daily and reserve and is_reserve_eve())
+                self.clan_battle_stamina = ClanBattleStamina(client, is_daily=is_daily) if use_policy else None
                 self.config["stamina_relative_not_run"] = any(db.is_campaign(campaign) for campaign in self.config.get("stamina_relative_not_run_campaign_before_one_day", []))
 
                 self.config.update(config)

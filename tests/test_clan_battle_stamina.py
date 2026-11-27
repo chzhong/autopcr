@@ -58,8 +58,8 @@ class PolicyTest(unittest.TestCase):
                 self.assertEqual(policy.mode(899), 'cp' if allow else None)
                 self.assertEqual(policy.mode(900), 'reserve' if reserve else None)
         last = ClanBattleStaminaPolicy(False, True, '05:00', False, DAY)
-        self.assertEqual(last.mode(0), 'unlimited')
-        self.assertEqual(last.mode(900), 'unlimited')
+        self.assertIsNone(last.mode(0))
+        self.assertEqual(last.mode(900), 'release')
 
 
 class StaminaIntegrationTest(unittest.IsolatedAsyncioTestCase):
@@ -210,34 +210,39 @@ class StaminaIntegrationTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_reserve_adjust_switch(self):
         self.policy()
-        with self.assertRaisesRegex(SkipError, 'CP值已经足够'):
+        with self.assertRaisesRegex(SkipError, '无需补CP或防爆调整'):
             await self.module().do_task(self.client)
         await self.module(overflow=True).do_task(self.client)
         self.assertEqual(self.client.data.stamina, 300)
         self.client.recover_stamina.assert_not_awaited()
 
-    async def test_last_battle_day_ignores_zen_and_no_adjust(self):
+    async def test_last_battle_day_releases_and_prevents_overflow(self):
         self.policy(tomorrow=False)
         self.client._keys.update(stamina_get_not_run=True, stamina_consume_not_run=True)
         self.assertFalse(self.module().is_stamina_get_not_run(self.client))
         self.assertFalse(self.module().is_stamina_consume_not_run(self.client))
         self.assertEqual(self.state.reserve_floor, 0)
-        with self.assertRaisesRegex(SkipError, 'CP值已经足够'):
-            await self.module(overflow=True).do_task(self.client)
-        self.client.quest_skip.assert_not_awaited()
+        await self.module(overflow=True).do_task(self.client)
+        self.assertEqual(self.client.data.stamina, 300)
+        self.client.recover_stamina.assert_not_awaited()
+        # 常规需求在最终日不受温存值限制。
+        _, clears, _ = await self.sweep(QUESTS[0], 10)
+        self.assertEqual(clears, 10)
 
-    async def test_no_battle_and_zen_without_permission(self):
+    async def test_no_battle_or_unconfigured_module_does_nothing(self):
         self.battle.return_value = False
-        with self.assertRaisesRegex(SkipError, '当前没有公会战'):
+        with self.assertRaisesRegex(SkipError, '当前没有有效'):
             await self.module().do_task(self.client)
         self.client.clan_battle_top.assert_not_awaited()
         self.battle.return_value = True
         self.state.point = 100
         self.client._keys['stamina_consume_not_run'] = True
-        with self.assertRaisesRegex(SkipError, '体力消耗，不执行'):
+        with self.assertRaisesRegex(SkipError, '当前没有有效'):
             await self.module().do_task(self.client)
+        self.client.quest_skip.assert_not_awaited()
 
     async def test_no_progress_and_game_purchase_limit(self):
+        self.policy()
         self.state.point = 100
         self.client.data.stamina = 0
         self.client.data.recover_stamina_exec_count = 40
@@ -275,6 +280,7 @@ class StaminaIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state.point, 630)
 
     async def test_no_sweepable_quests(self):
+        self.policy()
         self.state.point = 100
         self.client.data.is_quest_sweepable = lambda q: False
         with self.assertRaisesRegex(AbortError, '均无法扫荡'):
@@ -308,6 +314,227 @@ class StaminaIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.client.quest_skip.side_effect = reward_skip
         rewards, clears, stopped = await self.sweep(QUESTS[0], 3)
         self.assertEqual((rewards, clears, stopped), (['reward'], 1, True))
+
+    async def test_reserve_alone_obeys_zen_until_cp_full(self):
+        self.policy(allow=False)
+        self.state.point = 890
+        self.client._keys.update(stamina_get_not_run=True, stamina_consume_not_run=True)
+        self.assertTrue(self.module().is_stamina_get_not_run(self.client))
+        self.assertTrue(self.module().is_stamina_consume_not_run(self.client))
+        _, clears, stopped = await self.sweep(QUESTS[0], 1)
+        self.assertEqual((clears, stopped), (0, True))
+        self.client._keys['stamina_consume_not_run'] = False
+        await self.sweep(QUESTS[0], 1)
+        self.assertEqual(self.state.mode, 'reserve')
+
+    async def test_configure_outside_battle_is_noop(self):
+        self.battle.return_value = False
+        await self.state.configure(True, True, '05:00')
+        self.assertIsNone(self.state.policy)
+        self.client.clan_battle_top.assert_not_awaited()
+
+    async def test_unconfigured_state_does_not_pass_sweep_budget(self):
+        self.state.point = None
+        self.client.quest_skip_aware = AsyncMock(return_value=([], 0, False))
+        await self.sweep(QUESTS[0], 1)
+        self.client.quest_skip_aware.assert_awaited_once_with(QUESTS[0], 1, False, False)
+
+    async def test_configure_after_game_day_rollover_is_noop(self):
+        with patch.object(db, 'get_today_start_time', return_value=datetime(2026, 11, 27, 5)):
+            await self.state.configure(True, True, '05:00')
+        self.assertIsNone(self.state.policy)
+        self.client.clan_battle_top.assert_not_awaited()
+
+    async def test_parent_without_optional_state_uses_regular_sweep(self):
+        module = Module(SimpleNamespace(id='test-optional-state'))
+        self.assertIsNone(module.clan_battle_stamina)
+        self.client.quest_skip_aware = AsyncMock(return_value=([], 1, False))
+        await module.quest_skip_aware(self.client, QUESTS[0], 1)
+        self.client.quest_skip_aware.assert_awaited_once_with(QUESTS[0], 1, False, False)
+
+    def test_global_adaptation_options_are_first(self):
+        from autopcr.module.modules.daily import global_config
+        self.assertEqual(list(global_config(Parent()).generate_config())[:2], [
+            'clan_battle_stamina_options', 'clan_battle_attack_time',
+        ])
+
+    def test_grouped_config_migrates_and_explicit_empty_wins(self):
+        from autopcr.module.modules.daily import global_config
+        for allow in (False, True):
+            for reserve in (False, True):
+                parent = Parent({'clan_battle_allow_cp': allow, 'clan_battle_reserve_stamina': reserve})
+                module = global_config(parent)
+                expected = (['允许刷CP'] if allow else []) + (['为次日温存体力'] if reserve else [])
+                self.assertEqual(module.get_config('clan_battle_stamina_options'), expected)
+                parent.config['clan_battle_stamina_options'] = []
+                self.assertEqual(module.get_config('clan_battle_stamina_options'), [])
+                config = module.generate_config()['clan_battle_stamina_options']
+                self.assertEqual(config['config_type'], 'multi')
+                self.assertEqual(config['default'], [])
+
+    async def test_eve_reserves_without_cp_requests(self):
+        self.state.point = None
+        self.battle.side_effect = lambda when=None: when is not None and when >= DAY.replace(day=27)
+        await self.state.configure(False, True, '06:00')
+        self.assertEqual(self.state.mode, 'reserve')
+        self.client.clan_battle_top.assert_not_awaited()
+        self.client._keys.update(stamina_get_not_run=True, stamina_consume_not_run=True)
+        self.assertFalse(self.module().is_stamina_get_not_run(self.client))
+        await self.sweep(QUESTS[0], 100)
+        self.assertEqual(self.client.data.stamina, 300)
+        self.client.recover_stamina.assert_not_awaited()
+        with self.assertRaisesRegex(SkipError, '无需补CP'):
+            await self.module().do_task(self.client)
+
+    async def test_eve_before_noon_and_unrelated_days_do_not_configure(self):
+        for tomorrow in (False, True):
+            self.battle.side_effect = lambda when=None: tomorrow and when is not None
+            with patch.object(apiclient, 'datetime', DAY.replace(hour=11)):
+                state = ClanBattleStamina(self.client, is_daily=True)
+                await state.configure(True, True, '06:00')
+                self.assertIsNone(state.policy)
+        self.client.clan_battle_top.assert_not_awaited()
+
+    async def test_cp_fallback_activation_matrix(self):
+        for zen in (False, True):
+            for allow in (False, True):
+                for reserve in (False, True):
+                    for enabled in (False, True):
+                        for cp in (630, 900):
+                            with self.subTest(zen=zen, allow=allow, reserve=reserve, enabled=enabled, cp=cp):
+                                self.policy(allow=allow, reserve=reserve)
+                                self.state.point = cp
+                                self.client._keys['stamina_consume_not_run'] = zen
+                                module = self.module()
+                                module._parent.config[module.key] = enabled
+                                ok, _ = await module.do_check(self.client)
+                                self.assertEqual(ok, enabled or (cp < 900 and allow))
+
+    async def test_explicit_module_does_not_override_global_policy(self):
+        self.state.policy = None
+        self.state.point = 630
+        self.client.data.stamina = 89
+        self.client._keys.update(stamina_get_not_run=True, stamina_consume_not_run=True)
+        with self.assertRaisesRegex(SkipError, '当前没有有效'):
+            await self.module(recover=2).do_task(self.client)
+        self.client.quest_skip.assert_not_awaited()
+        self.client.recover_stamina.assert_not_awaited()
+
+    async def test_explicit_cp_module_execution_matrix(self):
+        for zen in (False, True):
+            for allow in (False, True):
+                for reserve in (False, True):
+                    for tomorrow in (False, True):
+                        for quota in (0, 1, 2):
+                            with self.subTest(zen=zen, allow=allow, reserve=reserve, tomorrow=tomorrow, quota=quota):
+                                self.policy(allow=allow, reserve=reserve, tomorrow=tomorrow)
+                                self.state.point = 630
+                                self.client.data.stamina = 89
+                                self.client.data.recover_stamina_exec_count = 0
+                                self.client._keys['stamina_consume_not_run'] = zen
+                                module = self.module(recover=quota)
+                                if not allow:
+                                    with self.assertRaisesRegex(SkipError, '无需补CP'):
+                                        await module.do_task(self.client)
+                                    self.assertEqual(self.state.point, 630)
+                                    self.assertEqual(self.client.data.stamina, 89)
+                                    continue
+                                await module.do_task(self.client)
+                                self.assertEqual(self.state.point == 900, quota == 2)
+                                self.assertEqual(self.client.data.recover_stamina_exec_count, quota)
+                                self.assertEqual(module.is_warn, quota < 2)
+                                self.assertEqual(self.client.is_stamina_consume_not_run(), zen)
+
+    async def test_daily_strategy_table(self):
+        from itertools import product
+        for phase, cp, zen, allow, reserve, overflow in product(
+                ('ordinary', 'eve', 'battle', 'last'), (630, 900), (False, True),
+                (False, True), (False, True), (False, True)):
+            with self.subTest(phase=phase, cp=cp, zen=zen, allow=allow, reserve=reserve, overflow=overflow):
+                in_battle = phase in ('battle', 'last')
+                tomorrow = phase in ('eve', 'battle')
+                self.battle.side_effect = lambda when=None: in_battle if when is None else tomorrow
+                self.state = ClanBattleStamina(self.client, is_daily=True)
+                self.state.point = cp if in_battle else None
+                self.client.data.stamina = 588
+                self.client.data.recover_stamina_exec_count = 0
+                self.client._keys.update(stamina_consume_not_run=zen, stamina_get_not_run=zen)
+                queries_before = self.client.clan_battle_top.await_count
+                await self.state.configure(allow, reserve, '06:00')
+                expected_mode = None
+                if phase == 'eve' and reserve:
+                    expected_mode = 'reserve'
+                elif in_battle:
+                    if cp < 900 and allow:
+                        expected_mode = 'cp'
+                    elif cp == 900 and reserve:
+                        expected_mode = 'reserve' if tomorrow else 'release'
+                self.assertEqual(self.state.mode, expected_mode)
+                module = self.module(overflow=overflow)
+                blocked = zen and expected_mode is None
+                self.assertEqual(module.is_stamina_get_not_run(self.client), blocked)
+                self.assertEqual(module.is_stamina_consume_not_run(self.client), blocked)
+                fill = in_battle and cp < 900 and allow
+                prevent = overflow and expected_mode in ('reserve', 'release')
+                self.assertEqual((await module.do_check(self.client))[0], fill or prevent)
+                if fill or prevent:
+                    await module.do_task(self.client)
+                else:
+                    with self.assertRaises(SkipError):
+                        await module.do_task(self.client)
+                expected_stamina = 318 if fill else 588
+                # CP刷满后，按新的温存/最终日释放模式决定是否继续防爆。
+                if overflow and reserve and (fill or prevent):
+                    expected_stamina = 300
+                self.assertEqual(self.client.data.stamina, expected_stamina)
+                if in_battle:
+                    self.assertEqual(self.state.point, 900 if fill else cp)
+                else:
+                    self.assertIsNone(self.state.point)
+                    self.assertEqual(self.client.clan_battle_top.await_count, queries_before)
+                self.assertEqual(self.client.is_stamina_consume_not_run(), zen)
+                self.assertEqual(self.client.data.recover_stamina_exec_count, 0)
+
+    async def test_morning_cp_transition_and_evening_reserve(self):
+        self.policy()
+        self.state.point = 890
+        self.client.data.stamina = 30
+        self.client._keys.update(stamina_consume_not_run=True, stamina_get_not_run=True)
+        with patch.object(apiclient, 'datetime', DAY.replace(hour=7)):
+            _, clears, stopped = await self.sweep(QUESTS[0], 20)
+            self.assertEqual((clears, stopped), (1, True))
+            self.assertEqual(self.state.point, 900)
+            self.assertEqual(self.client.data.stamina, 12)
+            self.assertEqual(self.state.reserve_floor, 184)
+        # 傍晚再次领取体力后按当时的温存值继续正常刷取。
+        self.client.data.stamina = 588
+        _, clears, stopped = await self.sweep(QUESTS[0], 100)
+        self.assertEqual((clears, stopped), (16, True))
+        self.assertEqual(self.state.reserve_floor, 294)
+        self.assertEqual(self.client.data.stamina, 300)
+        self.client.recover_stamina.assert_not_awaited()
+
+    async def test_forecast_changes_with_attack_time(self):
+        self.state.point = 900
+        self.client.data.stamina = 350  # 当前未满，但到06:00会溢出。
+        self.policy()
+        self.assertTrue(self.state.adjustment_needed(True))
+        self.state.policy = ClanBattleStaminaPolicy(True, True, '05:00', True, DAY)
+        self.assertEqual(self.state.recovery_floor, 304)
+        self.client.data.stamina = 300
+        self.assertFalse(self.state.adjustment_needed(True))
+        self.state.policy = ClanBattleStaminaPolicy(True, True, '06:00', True, DAY)
+        self.assertTrue(self.state.adjustment_needed(True))
+
+    async def test_missing_cp_does_not_enable_or_run_strategy(self):
+        self.state.point = None
+        with self.assertRaisesRegex(AbortError, '未获取到公会战CP'):
+            await self.state.configure(True, True, '06:00')
+        self.assertIsNone(self.state.policy)
+        with self.assertRaises(SkipError):
+            await self.module(recover=40, overflow=True).do_task(self.client)
+        self.client.quest_skip.assert_not_awaited()
+        self.client.recover_stamina.assert_not_awaited()
 
     async def test_global_options_only_initialize_cp_when_enabled(self):
         await self.state.configure(False, False, '05:00')

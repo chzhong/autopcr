@@ -1,5 +1,4 @@
 from ..modulebase import *
-from ..clan_battle_stamina import MAX_CLAN_BATTLE_CP
 from ..config import *
 from ...core.pcrclient import pcrclient
 from ...model.custom import ItemType
@@ -856,28 +855,33 @@ class last_normal_quest_sweep(DIY_sweep):
         quest: List[Tuple[int, int]] = [(id, last_sweep_quests_count) for id in last_sweep_quests]
         return quest
 
-@description('补刷最新主线N图，确保出刀所需的900 CP，或消耗超过温存值的体力。氪体数量为本模块本次额外购买上限。')
+@description('在常规刷取之后、每日20次任务之前兜底，遵守全局会战体力策略。'
+             '仅开启允许刷CP且会战CP不足900时补刷最新三个N图，氪体数量是本次额外购买上限，不足时告警。'
+             '温存开启且处于会战前夕午后，或会战CP已满时，防爆体可额外刷掉预计出刀时间前自回将溢出的体力；'
+             '关闭防爆体则不额外刷取。最终日CP满后不再温存，但仍可防爆。防爆不购买体力。')
 @name('会战期间体力调整')
 @inttype('clan_battle_adjust_recover', '氪体数量', 0, list(range(41)))
-@booltype('clan_battle_adjust_prevent_overflow', '防温存爆体', False)
+@booltype('clan_battle_adjust_prevent_overflow', '防爆体（预计出刀时间前）', False)
 @default(False)
 @tag_stamina_consume(do_check=False)
 class clan_battle_stamina_adjust(Module):
+    async def do_check(self, client: pcrclient):
+        state = self.clan_battle_stamina
+        if state is not None and state.adjustment_needed(self.get_config('clan_battle_adjust_prevent_overflow')):
+            return True, '会战体力自适应：兜底调整'
+        return await super().do_check(client)
+
     async def do_task(self, client: pcrclient):
         state = self.clan_battle_stamina
         if state is None:
             raise SkipError('当前没有公会战')
-        await state.get_top()
-        point = state.point
-        if point is None:
-            raise AbortError('未获取到公会战CP')
+        if not state.active or state.policy is None:
+            raise SkipError('当前没有有效的会战体力策略')
         adjust = self.get_config('clan_battle_adjust_prevent_overflow')
-        if point >= MAX_CLAN_BATTLE_CP and not (adjust and state.mode == 'reserve'):
-            raise SkipError('CP值已经足够')
-        if self.is_stamina_consume_not_run(client):
-            raise SkipError('体力消耗，不执行')
-
-        self._log(f'当前CP：{point}')
+        if not state.adjustment_needed(adjust):
+            raise SkipError('无需补CP或防爆调整')
+        point = state.point
+        self._log(f'当前CP：{point}' if point is not None else '会战前夕，执行防爆调整')
         policy = state.policy
         if policy and policy.reserve and policy.next_battle:
             self._log(f'预计出刀时间：{db.format_time(policy.target_time)}，温存值：{state.reserve_floor}')
@@ -901,17 +905,15 @@ class clan_battle_stamina_adjust(Module):
         try:
             while state.active:
                 before_cp = state.point
-                filling = before_cp < MAX_CLAN_BATTLE_CP
-                if not filling and not (adjust and state.mode == 'reserve'):
-                    break
-                if self.is_stamina_consume_not_run(client):
+                filling = state.needs_cp
+                if not state.adjustment_needed(adjust):
                     break
                 quest = available[index % len(available)]
                 cost = client.quest_stamina_cost(quest)
                 if cost <= 0:
                     raise AbortError('主线关卡体力消耗无效，停止调整')
-                if not filling and client.data.stamina - state.reserve_floor < cost:
-                    self._log('已达到会战温存体力')
+                if state.adjustment_batch(1, cost) <= 0:
+                    self._log('已达到调整目标，剩余差额不足一次扫荡')
                     break
                 # 禁用全局自动氪体；仅在补CP且不足一关体力时按本模块额度购买。
                 if client.data.stamina < cost:
@@ -924,7 +926,9 @@ class clan_battle_stamina_adjust(Module):
                         continue
                     self._warn(f'体力不足，CP 未到900（当前CP {before_cp}，本次购买{purchased}次）')
                     break
-                with client.override_config({'stamina_recover_times': client.data.recover_stamina_exec_count}):
+                with client.override_config({
+                    'stamina_recover_times': client.data.recover_stamina_exec_count,
+                }):
                     result, clears, _ = await self.quest_skip_aware(client, quest, 1)
                 rewards.extend(result)
                 counts[quest] += clears
