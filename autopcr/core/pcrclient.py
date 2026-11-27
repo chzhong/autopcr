@@ -1789,52 +1789,62 @@ class pcrclient(apiclient):
         result: List[InventoryInfo] = []
         clear_count = 0
         cost = self.quest_stamina_cost(quest)
-        async def skip(times) -> Tuple[bool, List[InventoryInfo]]:
+        async def skip(times: int, *, allow_recovery: bool = True) -> Tuple[bool, List[InventoryInfo]]:
+            if times <= 0:
+                return False, []
+            while self.data.stamina < cost * times:
+                if allow_recovery and self.stamina_recover_cnt > self.data.recover_stamina_exec_count:
+                    await self.recover_stamina()
+                else:
+                    return True, []
+            if db.is_shiori_quest(quest):
+                event = db.quest_to_event[quest].event_id
+                resp = await self.shiori_quest_skip(event, quest, times)
+            elif db.is_event_quest(quest):
+                event = db.quest_to_event[quest].event_id
+                resp = await self.event_quest_skip(event, quest, times)
+            elif db.is_talent_quest(quest):
+                resp = await self.talent_quest_skip(quest, times)
+            elif db.is_abyss_quest(quest):
+                resp = await self.abyss_quest_skip(quest, times)
+            else:
+                resp = await self.quest_skip(quest, times)
+
+            if budget is not None:
+                budget.record_spend(cost * times, resp)
+
             nonlocal clear_count
+            clear_count += times
+            if self.quest_skip_remaining is not None:
+                self.set_quest_skip_remaining(self.quest_skip_remaining - times)
+            result = []
+            if resp.quest_result_list:
+                for result_list in resp.quest_result_list:
+                    if hasattr(result_list, 'quest_result'):
+                        for quest_result in result_list.quest_result:
+                            result = result + quest_result.reward_list
+                    else:
+                        result = result + result_list.reward_list
+            if resp.bonus_reward_list:
+                result = result + resp.bonus_reward_list
+            return False, result
+
+        async def skip_with_budget(times: int) -> Tuple[bool, List[InventoryInfo]]:
+            assert budget is not None
             rewards = []
             while times > 0:
-                batch = budget.limit_batch(times, cost) if budget is not None else times
+                batch = budget.limit_batch(times, cost)
                 if batch <= 0:
                     return True, rewards
-                while self.data.stamina < cost * batch:
-                    if (self.stamina_recover_cnt > self.data.recover_stamina_exec_count
-                            and (budget is None or budget.can_recover_stamina())):
-                        await self.recover_stamina()
-                    else:
-                        return True, rewards
-                if db.is_shiori_quest(quest):
-                    event = db.quest_to_event[quest].event_id
-                    resp = await self.shiori_quest_skip(event, quest, batch)
-                elif db.is_event_quest(quest):
-                    event = db.quest_to_event[quest].event_id
-                    resp = await self.event_quest_skip(event, quest, batch)
-                elif db.is_talent_quest(quest):
-                    resp = await self.talent_quest_skip(quest, batch)
-                elif db.is_abyss_quest(quest):
-                    resp = await self.abyss_quest_skip(quest, batch)
-                else:
-                    resp = await self.quest_skip(quest, batch)
-
-                if budget is not None:
-                    budget.record_spend(cost * batch, resp)
-
-                clear_count += batch
-                if self.quest_skip_remaining is not None:
-                    self.set_quest_skip_remaining(self.quest_skip_remaining - batch)
-                result = []
-                if resp.quest_result_list:
-                    for result_list in resp.quest_result_list:
-                        if hasattr(result_list, 'quest_result'):
-                            for quest_result in result_list.quest_result:
-                                result = result + quest_result.reward_list
-                        else:
-                            result = result + result_list.reward_list
-                if resp.bonus_reward_list:
-                    result = result + resp.bonus_reward_list
-                rewards.extend(result)
+                stopped, batch_rewards = await skip(batch, allow_recovery=budget.can_recover_stamina())
+                rewards.extend(batch_rewards)
+                if stopped:
+                    return True, rewards
+                # 成功记账后，按最新状态计算余下的扫荡次数。
                 times -= batch
             return False, rewards
 
+        run_skip = skip if budget is None else skip_with_budget
         no_stamina = False
         if info.daily_limit:
             max_times = ((self.data.recover_max_time(quest) if recover else 0) + 1) * info.daily_limit - qinfo.daily_clear_count
@@ -1853,7 +1863,7 @@ class pcrclient(apiclient):
                         await self.recover_challenge(quest)
                     remain = info.daily_limit
                 t = min(times, remain)
-                no_stamina, resp = await skip(t)
+                no_stamina, resp = await run_skip(t)
                 result = result + resp
                 if no_stamina:
                     break
@@ -1861,7 +1871,7 @@ class pcrclient(apiclient):
                 times -= t
                 remain -= t
         else:
-            no_stamina, resp = await skip(times)
+            no_stamina, resp = await run_skip(times)
             result = result + resp
 
         if no_stamina and self.quest_skip_remaining is not None:

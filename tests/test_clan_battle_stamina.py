@@ -12,10 +12,11 @@ from autopcr.db.database import db
 from autopcr.module.modules import daily_modules
 from autopcr.module.modules.autosweep import clan_battle_stamina_adjust, daily_quest_mission
 from autopcr.module.modules.clan import clan_battle_knive
-from autopcr.module.modules.sweep import explore_exp
+from autopcr.module.modules.sweep import explore_exp, explore_mana
 from autopcr.module.modules.VIP import role_mission_get
-from autopcr.module.modulebase import Module, eResultStatus
+from autopcr.module.modulebase import Module, eResultStatus, tag_stamina_consume
 from autopcr.module.modulemgr import ModuleManager
+from autopcr.module.modulelistmgr import ModuleListManager
 from autopcr.model.common import ClanPoint
 from autopcr.model.enums import eMissionStatusType
 from autopcr.model.error import SkipError, AbortError
@@ -136,27 +137,29 @@ class StaminaIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state.stop_reason, '已达到会战温存体力')
         self.client.recover_stamina.assert_not_awaited()
 
-    async def test_training_sweeps_share_cp_and_respect_floor(self):
+    async def test_training_sweeps_ignore_clan_battle_stamina_policy(self):
         self.policy()
-        self.state.point = 890
         client = self.client
-        quest = 21002001
-        client.data.stamina = 340
-        client.data.get_max_quest_exp = lambda available: quest
-        client.data.training_quest_max_count = SimpleNamespace(exp_quest=5)
-        client.data.training_quest_count = SimpleNamespace(exp_quest=0)
+        client._keys['stamina_consume_not_run'] = True
+        client.data.stamina = 0
+        client.data.get_max_quest_exp = lambda available: 21002001
+        client.data.get_max_quest_mana = lambda available: 21001001
+        client.data.training_quest_max_count = SimpleNamespace(exp_quest=5, gold_quest=3)
+        client.data.training_quest_count = SimpleNamespace(exp_quest=1, gold_quest=1)
+        client.training_quest_skip = AsyncMock()
 
-        async def training_skip(quest_id, count):
-            client.data.stamina -= 18 * count
-            return SimpleNamespace()
-
-        client.training_quest_skip = AsyncMock(side_effect=training_skip)
-        with patch.object(type(db), 'training_quest_exp', {quest: SimpleNamespace(stamina=18)}):
-            await explore_exp(Parent(state=self.state)).do_task(client)
-        self.assertEqual(self.state.point, 900)
-        self.assertEqual(client.data.stamina, 304)
-        self.assertEqual([call.args for call in client.training_quest_skip.await_args_list], [(quest, 1), (quest, 1)])
-        self.assertEqual(self.state.stop_reason, '已达到会战温存体力')
+        for point in (890, 900):
+            self.state.point = point
+            for module_cls, quest, count in ((explore_exp, 21002001, 4), (explore_mana, 21001001, 2)):
+                with self.subTest(point=point, module=module_cls.__name__):
+                    client.training_quest_skip.reset_mock()
+                    module = module_cls(Parent(state=self.state))
+                    self.assertNotIn('体力消耗', module.tags)
+                    self.assertTrue((await module.do_check(client))[0])
+                    await module.do_task(client)
+                    client.training_quest_skip.assert_awaited_once_with(quest, count)
+                    self.assertEqual(self.state.point, point)
+        client.recover_stamina.assert_not_awaited()
 
     async def test_half_cost_and_receive_more_stamina(self):
         self.policy()
@@ -176,6 +179,21 @@ class StaminaIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(clears, 1)
         self.assertEqual(self.client.data.stamina, 292)
         self.assertTrue(stopped)
+
+    async def test_cp_and_reserve_limit_two_batches_in_one_request(self):
+        self.policy()
+        self.state.point = 870
+        self.client.data.stamina = 350  # 温存值为294，当前体力最多支持3次扫荡。
+        self.client._keys.update(stamina_recover_times=2, quest_skip_remaining=10)
+        quest = QUESTS[0]
+        _, clears, stopped = await self.sweep(quest, 5)
+
+        self.assertEqual([call.args for call in self.client.quest_skip.await_args_list], [(quest, 2), (quest, 1)])
+        self.assertEqual((clears, stopped), (3, True))
+        self.assertEqual(self.state.point, 900)
+        self.assertEqual(self.client.data.stamina, 296)
+        self.assertEqual(self.client.quest_skip_remaining, 7)
+        self.client.recover_stamina.assert_not_awaited()
 
     async def test_cp_threshold_restores_zen(self):
         self.policy(reserve=False)
@@ -339,6 +357,13 @@ class StaminaIntegrationTest(unittest.IsolatedAsyncioTestCase):
         await self.sweep(QUESTS[0], 1)
         self.client.quest_skip_aware.assert_awaited_once_with(QUESTS[0], 1, False, False)
 
+    async def test_untagged_module_does_not_receive_sweep_budget(self):
+        self.policy()
+        module = Module(Parent(state=self.state))
+        self.client.quest_skip_aware = AsyncMock(return_value=([], 1, False))
+        await module.quest_skip_aware(self.client, QUESTS[0], 1)
+        self.client.quest_skip_aware.assert_awaited_once_with(QUESTS[0], 1, False, False)
+
     async def test_configure_after_game_day_rollover_is_noop(self):
         with patch.object(db, 'get_today_start_time', return_value=datetime(2026, 11, 27, 5)):
             await self.state.configure(True, True, '05:00')
@@ -395,20 +420,14 @@ class StaminaIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(state.policy)
         self.client.clan_battle_top.assert_not_awaited()
 
-    async def test_cp_fallback_activation_matrix(self):
-        for zen in (False, True):
-            for allow in (False, True):
-                for reserve in (False, True):
-                    for enabled in (False, True):
-                        for cp in (630, 900):
-                            with self.subTest(zen=zen, allow=allow, reserve=reserve, enabled=enabled, cp=cp):
-                                self.policy(allow=allow, reserve=reserve)
-                                self.state.point = cp
-                                self.client._keys['stamina_consume_not_run'] = zen
-                                module = self.module()
-                                module._parent.config[module.key] = enabled
-                                ok, _ = await module.do_check(self.client)
-                                self.assertEqual(ok, enabled or (cp < 900 and allow))
+    async def test_cp_fallback_respects_module_checkbox(self):
+        self.policy()
+        self.state.point = 630
+        module = self.module()
+        self.assertTrue(self.state.needs_cp)
+        self.assertFalse((await module.do_check(self.client))[0])
+        module._parent.config[module.key] = True
+        self.assertTrue((await module.do_check(self.client))[0])
 
     async def test_explicit_module_does_not_override_global_policy(self):
         self.state.policy = None
@@ -476,7 +495,6 @@ class StaminaIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(module.is_stamina_consume_not_run(self.client), blocked)
                 fill = in_battle and cp < 900 and allow
                 prevent = overflow and expected_mode in ('reserve', 'release')
-                self.assertEqual((await module.do_check(self.client))[0], fill or prevent)
                 if fill or prevent:
                     await module.do_task(self.client)
                 else:
@@ -548,6 +566,7 @@ class StaminaIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.client._keys['stamina_consume_not_run'] = True
         client = self.client
 
+        @tag_stamina_consume
         class Sweep(Module):
             async def do_from(self, client):
                 await self.quest_skip_aware(client, QUESTS[0], 100)
@@ -605,11 +624,104 @@ class StaminaIntegrationTest(unittest.IsolatedAsyncioTestCase):
         client.data.stamina = 89
         await self.state.configure(True, True, '06:00')
         await self.module(recover=2).do_task(client)
-        knife = clan_battle_knive(Parent(state=self.state))
-        await knife.do_task(client)
-        self.assertTrue(any('体力点数：900' in line for line in knife.log))
+        self.assertEqual(self.state.point, 900)
         self.assertEqual(client.request.await_count, 1)
         self.assertEqual((await self.state.get_top()).point, 630)
+
+    async def test_daily_scope_ends_after_clan_adjustment_even_if_disabled(self):
+        client = self.client
+        client.activate = AsyncMock()
+        client.deactivate = Mock()
+        client.session = SimpleNamespace(_logged=True)
+        client.data.ready = True
+        client.data.stamina = 300
+        for kind in ('normal', 'hard', 'very_hard'):
+            setattr(client.data, f'is_{kind}_quest_campaign', lambda: False)
+        client._keys.update(stamina_get_not_run=True, stamina_consume_not_run=True)
+        client.mission_index = AsyncMock(return_value=SimpleNamespace(missions=[SimpleNamespace(
+            mission_id=123, mission_status=eMissionStatusType.NoClear, clear_num=19,
+        )]))
+        self.state.point = 900
+        manager = Parent({
+            'clan_battle_stamina_options': ['允许刷CP', '为次日温存体力'],
+            'clan_battle_attack_time': '06:00',
+            'daily_quest_mission_dusk_only': False,
+        })
+        manager.client = client
+        manager._daily_warnings = []
+        manager.is_clan_battle_forbidden = lambda: False
+
+        classes = daily_modules.modules
+        last_sweep = classes.index(daily_quest_mission)
+        for enabled, zen in ((True, True), (False, True), (True, False), (False, False)):
+            with self.subTest(adjustment_enabled=enabled, zen=zen):
+                client._keys.update(stamina_get_not_run=zen, stamina_consume_not_run=zen)
+                client.data.stamina = 300
+                client.quest_skip.reset_mock()
+                manager.config[clan_battle_stamina_adjust.__name__] = enabled
+                modules = [cls(manager) for cls in classes]
+                before = [module for module in modules[:last_sweep] if '体力获取' in module.tags]
+                after = [module for module in modules[last_sweep + 1:] if '体力获取' in module.tags]
+                self.assertEqual([module.key for module in before], [
+                    'mission_receive_first', 'clan_like', 'room_accept_all', 'present_receive',
+                ])
+                self.assertEqual([module.key for module in after], [
+                    'mission_receive_last', 'seasonpass_reward', 'room_upper_all',
+                ])
+                for module in before + after:
+                    module.do_task = AsyncMock()
+                    manager.config[module.key] = True
+                final = modules[last_sweep]
+                final._get_mission_ids = lambda: {123}
+                adjust = modules[last_sweep - 1]
+                self.assertIs(type(adjust), clan_battle_stamina_adjust)
+                ordered = [modules[0], *before, adjust, final, *after]
+                with patch.object(db, 'enter_cache_scope', new_callable=AsyncMock), \
+                        patch.object(db, 'exit_cache_scope', new_callable=AsyncMock):
+                    result = await ModuleManager.do_task(manager, {}, ordered, is_daily=True)
+                self.assertIn('无需补CP' if enabled else '功能未启用', result.result[adjust.key].log)
+                for module in before:
+                    module.do_task.assert_awaited_once_with(client)
+                if zen:
+                    client.quest_skip.assert_not_awaited()
+                    self.assertIn('禅模式下每日关卡任务未完成', result.result[final.key].log)
+                    for module in after:
+                        module.do_task.assert_not_awaited()
+                        self.assertIn('体力获取，不执行', result.result[module.key].log)
+                else:
+                    client.quest_skip.assert_awaited_once_with(QUESTS[0], 1)
+                    self.assertEqual(client.data.stamina, 282)
+                    self.assertIn('每日关卡任务已完成', result.result[final.key].log)
+                    for module in after:
+                        module.do_task.assert_awaited_once_with(client)
+
+    async def test_knife_tool_uses_independent_query(self):
+        client = self.client
+        client.activate = AsyncMock()
+        client.deactivate = Mock()
+        client.session = SimpleNamespace(_logged=True)
+        client.data.ready = True
+        manager = Parent({'clan_battle_stamina_options': ['允许刷CP', '为次日温存体力']})
+        manager.client = client
+        manager._daily_warnings = []
+        manager.is_clan_battle_forbidden = lambda: False
+        manager.modules_list = ModuleListManager(manager)
+        manager.do_task = ModuleManager.do_task.__get__(manager)
+        manager.save_single_result = AsyncMock(side_effect=lambda key, result: result)
+
+        async def query():
+            self.assertIsNone(manager.clan_battle_stamina)
+            return SimpleNamespace(point=630, remaining_count=3, carry_over=[])
+
+        client.clan_battle_top.side_effect = query
+        with patch.object(db, 'enter_cache_scope', new_callable=AsyncMock), \
+                patch.object(db, 'exit_cache_scope', new_callable=AsyncMock):
+            for in_battle in (True, False):
+                self.battle.return_value = in_battle
+                result = await ModuleManager.do_from_key(manager, {}, clan_battle_knive.__name__)
+                self.assertEqual(result.status, eResultStatus.WARNING)
+                self.assertIn('体力点数：630', result.log)
+        self.assertEqual(client.clan_battle_top.await_count, 2)
 
     async def test_top_cache_expires_between_runs_and_game_days(self):
         self.state.point = 630
@@ -641,8 +753,6 @@ class StaminaIntegrationTest(unittest.IsolatedAsyncioTestCase):
             sweep = clan_battle_stamina_adjust(manager)
             with self.assertRaisesRegex(SkipError, '当前没有公会战'):
                 await sweep.do_task(client)
-            with self.assertRaisesRegex(SkipError, '当前没有公会战'):
-                await clan_battle_knive(manager).do_task(client)
             await sweep.quest_skip_aware(client, QUESTS[0], 1)
             return SimpleNamespace(status=eResultStatus.SUCCESS)
 

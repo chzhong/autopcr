@@ -855,7 +855,7 @@ class last_normal_quest_sweep(DIY_sweep):
         quest: List[Tuple[int, int]] = [(id, last_sweep_quests_count) for id in last_sweep_quests]
         return quest
 
-@description('在常规刷取之后、每日20次任务之前兜底，遵守全局会战体力策略。'
+@description('勾选后在常规刷取之后、每日20次任务之前兜底，遵守全局会战体力策略。'
              '仅开启允许刷CP且会战CP不足900时补刷最新三个N图，氪体数量是本次额外购买上限，不足时告警。'
              '温存开启且处于会战前夕午后，或会战CP已满时，防爆体可额外刷掉预计出刀时间前自回将溢出的体力；'
              '关闭防爆体则不额外刷取。最终日CP满后不再温存，但仍可防爆。防爆不购买体力。')
@@ -865,12 +865,6 @@ class last_normal_quest_sweep(DIY_sweep):
 @default(False)
 @tag_stamina_consume(do_check=False)
 class clan_battle_stamina_adjust(Module):
-    async def do_check(self, client: pcrclient):
-        state = self.clan_battle_stamina
-        if state is not None and state.adjustment_needed(self.get_config('clan_battle_adjust_prevent_overflow')):
-            return True, '会战体力自适应：兜底调整'
-        return await super().do_check(client)
-
     async def do_task(self, client: pcrclient):
         state = self.clan_battle_stamina
         if state is None:
@@ -1002,7 +996,7 @@ class daily_quest_mission(Module):
         if dusk_only and not is_dusk:
             raise SkipError(f"每日关卡任务尚需通关{remain}次，傍晚之后才刷取")
 
-        if self.is_stamina_consume_not_run(client):
+        if client.is_stamina_consume_not_run():
             self._warn(f"禅模式下每日关卡任务未完成，尚需通关{remain}次")
             return
 
@@ -1016,8 +1010,8 @@ class daily_quest_mission(Module):
         while remain > 0:
             for quest_id in quests:
                 count = min(self.sweep_count, remain)
-                reward, clear_count, no_stamina = await self.quest_skip_aware(
-                    client, quest_id, count, True, True
+                reward, clear_count, no_stamina = await client.quest_skip_aware(
+                    quest_id, count, True, True
                 )
                 result += reward
                 if clear_count:
@@ -1038,7 +1032,7 @@ class daily_quest_mission(Module):
                 self._log(await client.serialize_reward_summary(result))
 
         if remain > 0:
-            self._warn(f"{self.stamina_stop_reason or '体力不足'}，每日关卡任务尚需通关{remain}次")
+            self._warn(f"体力不足，每日关卡任务尚需通关{remain}次")
         else:
             self._log("每日关卡任务已完成")
 

@@ -207,12 +207,16 @@ class ClanBattleStaminaConfig(MultiChoiceConfig):
                          ['允许刷CP', '为次日温存体力'])
 
     def get_value(self):
-        if self.get_raw_value() is not None:
-            return super().get_value()
+        return self.read_options(self._parent._get_raw_config)
+
+    def read_options(self, get_config: Callable) -> List[str]:
+        raw = get_config(self.key, None)
+        if raw is not None:
+            return self.validate_value(self.process_value(raw)) or self.default
         return [label for key, label in (
             ('clan_battle_allow_cp', '允许刷CP'),
             ('clan_battle_reserve_stamina', '为次日温存体力'),
-        ) if self._parent._get_raw_config(key, False)]
+        ) if get_config(key, False)]
 
 
 class LabyrinthBossConfig(MultiChoiceConfig):

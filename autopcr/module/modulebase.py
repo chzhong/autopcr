@@ -229,7 +229,7 @@ class Module:
         self, client: pcrclient, quest: int, times: int, recover: bool = False, is_total: bool = False,
     ) -> Tuple[List[InventoryInfo], int, bool]:
         state = self.clan_battle_stamina
-        if state is None or (state.point is None and state.policy is None):
+        if '体力消耗' not in self.tags or state is None or (state.point is None and state.policy is None):
             return await client.quest_skip_aware(quest, times, recover, is_total)
         state.stop_reason = ''
         return await client.quest_skip_aware(quest, times, recover, is_total, budget=state)

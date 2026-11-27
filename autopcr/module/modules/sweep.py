@@ -29,24 +29,8 @@ class explore_sweep(Module):
             if self.not_max_stop() and max_quest != quest_id:
                 raise AbortError(f"最高级探索{max_quest}未通关，不扫荡\n如欲扫荡已通关的，请关闭【非最高不扫荡】")
             name = db.get_quest_name(quest_id)
-            state = self.clan_battle_stamina
-            if state is None or (state.point is None and state.policy is None):
-                await client.training_quest_skip(quest_id, remain_cnt)
-                self._log(f"{name}扫荡{remain_cnt}次")
-                return
-
-            quest = db.training_quest_exp.get(quest_id) or db.training_quest_mana[quest_id]
-            swept = 0
-            while swept < remain_cnt:
-                batch = state.limit_batch(remain_cnt - swept, quest.stamina)
-                if not batch:
-                    break
-                response = await client.training_quest_skip(quest_id, batch)
-                state.record_spend(quest.stamina * batch, response)
-                swept += batch
-            if not swept:
-                raise SkipError(state.stop_reason)
-            self._log(f"{name}扫荡{swept}次")
+            await client.training_quest_skip(quest_id, remain_cnt)
+            self._log(f"{name}扫荡{remain_cnt}次")
         else:
             raise SkipError("今日已扫荡")
 
