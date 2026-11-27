@@ -15,6 +15,7 @@ from ..util.logger import instance as logger
 
 if TYPE_CHECKING:
     from .clan_battle_stamina import ClanBattleStamina
+    from .modulemgr import ModuleManager
 
 def default(val):
     return lambda cls:_wrap_init(cls, lambda self: setattr(self, 'default', val))
@@ -137,7 +138,7 @@ class ModuleResult:
 # refers to a schudule to be done
 class Module:
 
-    def __init__(self, parent):
+    def __init__(self, parent: 'ModuleManager'):
         self.key: str = self.__class__.__name__
         self.name: str = ""
         self.default: bool = False
@@ -149,8 +150,7 @@ class Module:
         self.config_overrides: Dict[str, Any] = {}
         self.implmented = True
         self.need_login = True
-        from .modulemgr import ModuleManager
-        self._parent: ModuleManager = parent
+        self._parent = parent
         self.log: List[str] = []
         self.warn: List[str] = []
         self.is_warn: bool = False
@@ -210,26 +210,41 @@ class Module:
 
     @property
     def clan_battle_stamina(self) -> Optional['ClanBattleStamina']:
-        return getattr(self._parent, 'clan_battle_stamina', None)
+        """
+        会战特殊体力策略：管理器在清日常过程中建立和清除状态，每次读取都以当前阶段为准。
+        """
+        return self._parent.clan_battle_stamina
+
 
     @property
     def stamina_stop_reason(self) -> str:
-        state = self.clan_battle_stamina
-        return state.stop_reason if state is not None else ''
+        return state.stop_reason if (state := self.clan_battle_stamina) is not None else ''
 
     def is_stamina_consume_not_run(self, client: pcrclient) -> bool:
+        """
+        体力消耗综合判定：
+        - 清日常的调整阶段由当前会战策略决定是否临时放行，实际可扫次数由预算限制。
+        - 无放行策略时按禅模式执行。保留客户端的原标志，供 CP 达标后和调整结束后重判。
+        """
         state = self.clan_battle_stamina
         return client.is_stamina_consume_not_run() and (state is None or state.mode is None)
 
     def is_stamina_get_not_run(self, client: pcrclient) -> bool:
+        """
+        体力获取综合判定：
+        - 清日常的调整阶段按当前会战策略临时放行，先领取体力供后续扫荡。
+        - 无放行策略时按禅模式执行，包括会战调整模块之后的领奖。
+        """
         state = self.clan_battle_stamina
         return client.is_stamina_get_not_run() and (state is None or state.mode is None)
 
     async def quest_skip_aware(
         self, client: pcrclient, quest: int, times: int, recover: bool = False, is_total: bool = False,
     ) -> Tuple[List[InventoryInfo], int, bool]:
+        # 会战预算只通过带体力消耗标签的模块传入，供客户端在实际扫荡前限制次数。
         state = self.clan_battle_stamina
         if '体力消耗' not in self.tags or state is None or (state.point is None and state.policy is None):
+            # 常规扫荡沿用现有执行路径。
             return await client.quest_skip_aware(quest, times, recover, is_total)
         state.stop_reason = ''
         return await client.quest_skip_aware(quest, times, recover, is_total, budget=state)
@@ -244,6 +259,7 @@ class Module:
             self.warn.clear()
             self.is_warn = False
             self.abort_message = ""
+            # 停止原因随共享策略传递，进入新模块时清掉上个模块留下的原因。
             if self.clan_battle_stamina is not None:
                 self.clan_battle_stamina.stop_reason = ''
 
@@ -281,6 +297,7 @@ class Module:
             result.log = str(e)
             result.status = eResultStatus.ERROR
         finally:
+            # 通用扫荡只返回停止标志，在模块结果中补上具体的策略原因。
             reason = self.stamina_stop_reason
             if reason and reason not in result.log and not any(reason in line for line in self.log):
                 self._log(reason)

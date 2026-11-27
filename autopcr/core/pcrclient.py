@@ -11,7 +11,7 @@ from collections import Counter
 from contextlib import contextmanager
 
 class QuestSweepBudget(Protocol):
-    """Optional limits and accounting supplied by a sweep caller."""
+    """调用方提供的扫荡策略。客户端只负责按预算执行并报告成功消耗。"""
 
     def limit_batch(self, times: int, cost: int) -> int: ...
     def can_recover_stamina(self) -> bool: ...
@@ -1810,6 +1810,7 @@ class pcrclient(apiclient):
             else:
                 resp = await self.quest_skip(quest, times)
 
+            # 成功扫荡才记入预算，下一批可根据响应重新判断可用次数。
             if budget is not None:
                 budget.record_spend(cost * times, resp)
 
@@ -1830,6 +1831,7 @@ class pcrclient(apiclient):
             return False, result
 
         async def skip_with_budget(times: int) -> Tuple[bool, List[InventoryInfo]]:
+            # 预算只决定批次大小和是否回体，实际请求和次数统计仍由 skip 完成。
             assert budget is not None
             rewards = []
             while times > 0:
@@ -1854,6 +1856,7 @@ class pcrclient(apiclient):
             remain = info.daily_limit * (qinfo.daily_recovery_count + 1) - qinfo.daily_clear_count
             while times > 0:
                 if remain == 0:
+                    # 体力策略已不允许扫荡时，连关卡次数也不购买。
                     if budget is not None and budget.limit_batch(1, cost) <= 0:
                         no_stamina = True
                         break
@@ -1864,6 +1867,7 @@ class pcrclient(apiclient):
                     remain = info.daily_limit
                 t = min(times, remain)
                 no_stamina, resp = await run_skip(t)
+                # 预算可能允许先完成部分扫荡，再要求停止，已获得的奖励仍要保留。
                 result = result + resp
                 if no_stamina:
                     break

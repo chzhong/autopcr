@@ -167,6 +167,7 @@ class ModuleManager:
             await client.activate()
             activated = True
             try:
+                # 只为清日常准备策略状态，登录后由全局配置按选项和当日 CP 启用。
                 use_policy = False
                 if is_daily:
                     task_config = {**self.config, **config}
@@ -187,7 +188,8 @@ class ModuleManager:
                     resp.order.append(module.key)
                     resp.result[module.key] = await module.do_from(client)
                     if module.key == 'clan_battle_stamina_adjust':
-                        # 会战调整结束后，每日关卡任务和领奖沿用原有体力规则。
+                        # 此处是会战策略的截止位置，即使本模块未勾选也要清除。
+                        # 每日关卡任务和后续领奖沿用原有的禅模式规则。
                         self.clan_battle_stamina = None
                     if resp.result[module.key].status == eResultStatus.WARNING:
                         self._daily_warnings.extend(

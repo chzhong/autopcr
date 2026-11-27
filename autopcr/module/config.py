@@ -211,6 +211,7 @@ class ClanBattleStaminaConfig(MultiChoiceConfig):
 
     def read_options(self, get_config: Callable) -> List[str]:
         raw = get_config(self.key, None)
+        # 新配置显式保存为空也代表用户已选择，只有缺少新值时才读取旧开关。
         if raw is not None:
             return self.validate_value(self.process_value(raw)) or self.default
         return [label for key, label in (

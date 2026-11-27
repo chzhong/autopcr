@@ -863,6 +863,7 @@ class last_normal_quest_sweep(DIY_sweep):
 @inttype('clan_battle_adjust_recover', '氪体数量', 0, list(range(41)))
 @booltype('clan_battle_adjust_prevent_overflow', '防爆体（预计出刀时间前）', False)
 @default(False)
+# 保留体力标签以接入共享预算，由模块内的会战策略判断是否需要实际补刷。
 @tag_stamina_consume(do_check=False)
 class clan_battle_stamina_adjust(Module):
     async def do_task(self, client: pcrclient):
@@ -909,7 +910,7 @@ class clan_battle_stamina_adjust(Module):
                 if state.adjustment_batch(1, cost) <= 0:
                     self._log('已达到调整目标，剩余差额不足一次扫荡')
                     break
-                # 禁用全局自动氪体；仅在补CP且不足一关体力时按本模块额度购买。
+                # 仅在补 CP 且体力不足一关时购买，同时遵守模块额度和账号上限。
                 if client.data.stamina < cost:
                     if filling and purchased < quota and client.data.recover_stamina_exec_count < purchase_limit:
                         before = client.data.stamina
@@ -920,6 +921,7 @@ class clan_battle_stamina_adjust(Module):
                         continue
                     self._warn(f'体力不足，CP 未到900（当前CP {before_cp}，本次购买{purchased}次）')
                     break
+                # 屏蔽通用扫荡的全局氪体额度，避免兜底绕过本模块额度。
                 with client.override_config({
                     'stamina_recover_times': client.data.recover_stamina_exec_count,
                 }):

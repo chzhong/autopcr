@@ -99,6 +99,7 @@ daily_modules = ModuleList(
         lazy_normal_sweep,
 
         all_in_hatsune,
+        # 先满足常规扫荡需求，再补 CP 或防爆。之后的 20 次任务沿用原规则。
         clan_battle_stamina_adjust,
         daily_quest_mission,
 

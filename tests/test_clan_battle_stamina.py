@@ -370,8 +370,8 @@ class StaminaIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.state.policy)
         self.client.clan_battle_top.assert_not_awaited()
 
-    async def test_parent_without_optional_state_uses_regular_sweep(self):
-        module = Module(SimpleNamespace(id='test-optional-state'))
+    async def test_no_active_state_uses_regular_sweep(self):
+        module = clan_battle_stamina_adjust(Parent())
         self.assertIsNone(module.clan_battle_stamina)
         self.client.quest_skip_aware = AsyncMock(return_value=([], 1, False))
         await module.quest_skip_aware(self.client, QUESTS[0], 1)
