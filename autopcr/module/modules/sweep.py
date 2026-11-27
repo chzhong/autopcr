@@ -29,8 +29,24 @@ class explore_sweep(Module):
             if self.not_max_stop() and max_quest != quest_id:
                 raise AbortError(f"最高级探索{max_quest}未通关，不扫荡\n如欲扫荡已通关的，请关闭【非最高不扫荡】")
             name = db.get_quest_name(quest_id)
-            await client.training_quest_skip(quest_id, remain_cnt)
-            self._log(f"{name}扫荡{remain_cnt}次")
+            state = self.clan_battle_stamina
+            if state is None or state.point is None:
+                await client.training_quest_skip(quest_id, remain_cnt)
+                self._log(f"{name}扫荡{remain_cnt}次")
+                return
+
+            quest = db.training_quest_exp.get(quest_id) or db.training_quest_mana[quest_id]
+            swept = 0
+            while swept < remain_cnt:
+                batch = state.limit_batch(remain_cnt - swept, quest.stamina)
+                if not batch:
+                    break
+                response = await client.training_quest_skip(quest_id, batch)
+                state.record_spend(quest.stamina * batch, response)
+                swept += batch
+            if not swept:
+                raise SkipError(state.stop_reason)
+            self._log(f"{name}扫荡{swept}次")
         else:
             raise SkipError("今日已扫荡")
 
@@ -258,8 +274,8 @@ class investigate_sweep(Module):
             daily_limit = max(1, quest.daily_limit)
             target_count[quest.quest_id] = target_count.get(quest.quest_id, 0) + daily_limit
             try:
-                result, current_clear_count, no_stamina = await client.quest_skip_aware(
-                    quest.quest_id,
+                result, current_clear_count, no_stamina = await self.quest_skip_aware(
+                    client, quest.quest_id,
                     target_count[quest.quest_id],
                     recover=True,
                     is_total=True,
@@ -274,7 +290,7 @@ class investigate_sweep(Module):
 
         if not clear_count:
             if no_stamina:
-                raise SkipError(client.stamina_stop_reason or f"{self.material_name()}关卡体力不足")
+                raise SkipError(self.stamina_stop_reason or f"{self.material_name()}关卡体力不足")
             raise SkipError(f"没有可扫荡的{self.material_name()}关卡次数")
 
         msg = await client.serialize_reward_summary(rewards)

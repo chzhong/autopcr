@@ -4,13 +4,17 @@ from dataclasses_json import dataclass_json
 from ..core.pcrclient import eLoginStatus, pcrclient
 from ..model.error import *
 from ..model.enums import *
-from typing import Dict, List, Tuple, Union, Any, Iterator
+from typing import Dict, List, Tuple, Union, Any, Iterator, Optional, TYPE_CHECKING
+from ..model.common import InventoryInfo
 from ..constants import CACHE_DIR
 from .config import Config, _wrap_init
 from enum import Enum
 from datetime import datetime
 from ..db.database import db
 from ..util.logger import instance as logger
+
+if TYPE_CHECKING:
+    from .clan_battle_stamina import ClanBattleStamina
 
 def default(val):
     return lambda cls:_wrap_init(cls, lambda self: setattr(self, 'default', val))
@@ -64,7 +68,7 @@ def tag_stamina_consume(cls=None, *, do_check: bool = True):
             ok, msg = await old_do_check(client)
             if not ok: 
                 return ok, msg
-            if client.is_stamina_consume_not_run():
+            if self.is_stamina_consume_not_run(client):
                 return False, '体力消耗，不执行'
             return True, ''
         self.do_check = new_do_check
@@ -82,7 +86,7 @@ def tag_stamina_get(cls):
             ok, msg = await old_do_check(client)
             if not ok: 
                 return ok, msg
-            if client.is_stamina_get_not_run():
+            if self.is_stamina_get_not_run(client):
                 return False, '体力获取，不执行'
             return True, ''
         self.do_check = new_do_check
@@ -204,6 +208,32 @@ class Module:
         else:
             return True, ""
 
+    @property
+    def clan_battle_stamina(self) -> Optional['ClanBattleStamina']:
+        return self._parent.clan_battle_stamina
+
+    @property
+    def stamina_stop_reason(self) -> str:
+        state = self.clan_battle_stamina
+        return state.stop_reason if state is not None else ''
+
+    def is_stamina_consume_not_run(self, client: pcrclient) -> bool:
+        state = self.clan_battle_stamina
+        return client.is_stamina_consume_not_run() and (state is None or state.mode is None)
+
+    def is_stamina_get_not_run(self, client: pcrclient) -> bool:
+        state = self.clan_battle_stamina
+        return client.is_stamina_get_not_run() and (state is None or state.mode is None)
+
+    async def quest_skip_aware(
+        self, client: pcrclient, quest: int, times: int, recover: bool = False, is_total: bool = False,
+    ) -> Tuple[List[InventoryInfo], int, bool]:
+        state = self.clan_battle_stamina
+        if state is None:
+            return await client.quest_skip_aware(quest, times, recover, is_total)
+        state.stop_reason = ''
+        return await client.quest_skip_aware(quest, times, recover, is_total, budget=state)
+
     async def do_from(self, client: pcrclient) -> ModuleResult:
         result: ModuleResult = ModuleResult(
                 name=self.name,
@@ -214,7 +244,8 @@ class Module:
             self.warn.clear()
             self.is_warn = False
             self.abort_message = ""
-            client.stamina_stop_reason = ""
+            if self.clan_battle_stamina is not None:
+                self.clan_battle_stamina.stop_reason = ''
 
             if self.need_login:
                 if client.logged == eLoginStatus.NOT_LOGGED or not client.data.ready:
@@ -250,8 +281,9 @@ class Module:
             result.log = str(e)
             result.status = eResultStatus.ERROR
         finally:
-            if client.stamina_stop_reason and not any(client.stamina_stop_reason in line for line in self.log):
-                self._log(client.stamina_stop_reason)
+            reason = self.stamina_stop_reason
+            if reason and reason not in result.log and not any(reason in line for line in self.log):
+                self._log(reason)
             result.log = ('\n'.join(self.log) + "\n" + result.log).strip() or "ok"
             result.table = self.table
 

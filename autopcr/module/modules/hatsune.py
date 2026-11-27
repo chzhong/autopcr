@@ -54,12 +54,12 @@ class hatsune_h_sweep(Module):
 
             for quest_id in quests:
                 try:
-                    reward, clear_count, no_stamina = await client.quest_skip_aware(quest_id, 3, False, True)
+                    reward, clear_count, no_stamina = await self.quest_skip_aware(client, quest_id, 3, False, True)
                     if clear_count:
                         do_sweep = True
                         self._log(f"{quest_id}: 扫荡{clear_count}次")
                     if no_stamina:
-                        self._log(f"{quest_id}: 刷取{db.get_quest_name(quest_id)}{client.stamina_stop_reason or '体力不足'}")
+                        self._log(f"{quest_id}: 刷取{db.get_quest_name(quest_id)}{self.stamina_stop_reason or '体力不足'}")
                         break
 
                 except SkipError as e:
@@ -473,7 +473,7 @@ class all_in_hatsune(Module):
         count = 0
         while True:
             try:
-                reward, clear_count, no_stamina = await client.quest_skip_aware(quest, 12)
+                reward, clear_count, no_stamina = await self.quest_skip_aware(client, quest, 12)
                 count += clear_count
                 if no_stamina:
                     break
@@ -486,10 +486,10 @@ class all_in_hatsune(Module):
         remain = client.data.stamina // db.quest_info[quest].stamina
 
         if remain: 
-            reward, clear_count, no_stamina = await client.quest_skip_aware(quest, remain)
+            reward, clear_count, no_stamina = await self.quest_skip_aware(client, quest, remain)
             count += clear_count
 
         if count:
             self._log(f"已刷{quest}图{count}次")
         else:
-            raise SkipError(client.stamina_stop_reason or "体力不足")
+            raise SkipError(self.stamina_stop_reason or "体力不足")

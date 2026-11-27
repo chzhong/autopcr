@@ -1,4 +1,5 @@
 from ..modulebase import *
+from ..clan_battle_stamina import MAX_CLAN_BATTLE_CP
 from ..config import *
 from ...core.pcrclient import pcrclient
 from ...core.apiclient import apiclient
@@ -13,9 +14,13 @@ import random
 @tag_stamina_get
 class clan_battle_knive(Module):
     async def do_task(self, client: pcrclient):
-        top = await client.clan_battle_top()
+        state = self.clan_battle_stamina
+        if state is None:
+            raise SkipError('当前没有公会战')
+        top = await state.get_top()
+        point = state.point
         carry_over_count = len(top.carry_over) if top.carry_over else 0
-        if not top.remaining_count and top.point == 900 and carry_over_count == 0:
+        if not top.remaining_count and point == MAX_CLAN_BATTLE_CP and carry_over_count == 0:
             self._log("今日三刀已出完！")
         else:
             status_parts = []
@@ -27,7 +32,7 @@ class clan_battle_knive(Module):
                 time_str = "、".join(f"{t}秒" for t in time_list)
                 count = len(time_list)
                 status_parts.append(f"剩余尾刀：{count}（{time_str}）")
-            status_parts.append(f"体力点数：{top.point}")
+            status_parts.append(f"体力点数：{point}")
             self._warn(" | ".join(status_parts))
 
 @description('在公会中自动随机选择一位成员点赞。')

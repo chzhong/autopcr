@@ -86,7 +86,7 @@ class role_mission_get(Module):
                         if count or client.quest_skip_no_stamina:
                             msg = f"{sweep.name}: 扫荡{count}次"
                             if client.quest_skip_no_stamina:
-                                msg += "，" + (client.stamina_stop_reason or "体力不足")
+                                msg += "，" + (self.stamina_stop_reason or "体力不足")
                             self._log(msg)
                     if result.status == eResultStatus.PANIC:
                         raise PanicError(f"{sweep.name}执行失败: {result.log}")

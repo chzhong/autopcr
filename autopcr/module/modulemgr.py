@@ -1,13 +1,14 @@
 from dataclasses import dataclass
 
 from dataclasses_json import dataclass_json
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from abc import abstractmethod, abstractproperty
 
 from ..model.error import *
 from ..model.enums import *
 from ..db.database import db
 from .modulebase import Module, ModuleResult, eResultStatus
+from .clan_battle_stamina import ClanBattleStamina
 from ..core.clientpool import PoolClientWrapper
 import traceback
 import os
@@ -84,6 +85,7 @@ class ModuleManager:
     def __init__(self, config: dict):
         from .modulelistmgr import ModuleListManager
         self._daily_warnings: List[Tuple[str, str]] = []
+        self.clan_battle_stamina: Optional[ClanBattleStamina] = None
         self.modules_list: ModuleListManager = ModuleListManager(self)
         self.config = config
 
@@ -146,7 +148,8 @@ class ModuleManager:
     async def do_task(self, config: dict, modules: List[Module], isAdminCall: bool = False, *, is_daily: bool = False) -> TaskResult:
         await db.enter_cache_scope()
         try:
-            if db.is_clan_battle_time() and self.is_clan_battle_forbidden() and not isAdminCall:
+            in_clan_battle = db.is_clan_battle_time()
+            if in_clan_battle and self.is_clan_battle_forbidden() and not isAdminCall:
                 key = 'clan_battle' if not modules else modules[0].key
                 return TaskResult(
                     order = [key],
@@ -162,8 +165,8 @@ class ModuleManager:
             activated = False
             await client.activate()
             activated = True
-            client.begin_daily_execution(is_daily)
             try:
+                self.clan_battle_stamina = ClanBattleStamina(client, is_daily=is_daily) if in_clan_battle else None
                 self.config["stamina_relative_not_run"] = any(db.is_campaign(campaign) for campaign in self.config.get("stamina_relative_not_run_campaign_before_one_day", []))
 
                 self.config.update(config)
@@ -194,7 +197,7 @@ class ModuleManager:
 
                 return resp
             finally:
-                client.end_daily_execution()
+                self.clan_battle_stamina = None
                 self._daily_warnings.clear()
                 if activated:
                     client.deactivate()

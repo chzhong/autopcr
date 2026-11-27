@@ -65,16 +65,19 @@ class global_config(Module):
                 client.set_stamina_consume_not_run()
                 self._log(msg + "禅模式")
 
-        await client.configure_clan_stamina(
+        state = self.clan_battle_stamina
+        if state is None:
+            return
+        await state.configure(
             self.get_config('clan_battle_allow_cp'),
             self.get_config('clan_battle_reserve_stamina'),
             self.get_config('clan_battle_attack_time'),
         )
-        mode = client.clan_stamina_mode
+        mode = state.mode
         if mode == 'cp':
-            self._log(f"会战体力自适应：当前CP {client.data.clan_battle_point}，允许获取和消耗体力补CP")
+            self._log(f"会战体力自适应：当前CP {state.point}，允许获取和消耗体力补CP")
         elif mode == 'reserve':
-            self._log(f"会战体力自适应：允许获取体力，温存值{client.clan_stamina_floor}")
+            self._log(f"会战体力自适应：允许获取体力，温存值{state.reserve_floor}")
         elif mode == 'unlimited':
             self._log('下个游戏日无公会战，允许获取和消耗体力，不温存')
 

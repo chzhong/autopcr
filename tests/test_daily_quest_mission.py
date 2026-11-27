@@ -10,6 +10,7 @@ from autopcr.module.modules.autosweep import daily_quest_mission
 
 
 class FakeParent:
+    clan_battle_stamina = None
     id = "test"
 
     def __init__(self, config=None):
@@ -20,7 +21,6 @@ class FakeParent:
 
 
 class FakeClient:
-    stamina_stop_reason = ""
     def __init__(self, mission=None, zen=False, stop_after=None):
         self.mission = mission
         self.zen = zen
